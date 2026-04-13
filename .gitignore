@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+images5000/
+images1000/
+checkpoints/
+.ipynb_checkpoints/
+inference_results/
