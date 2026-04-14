@@ -1,0 +1,16 @@
+name: general-decomp
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch>=2.0.0
+  - torchvision>=0.15.0
+  - pip
+  - pip:
+    - einops>=0.7.0
+    - pillow>=9.0.0
+    - tqdm>=4.65.0
+    - tensorboard>=2.14.0
