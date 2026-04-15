@@ -9,3 +9,5 @@ images1000/
 checkpoints/
 .ipynb_checkpoints/
 inference_results/
+results/
+test_images/

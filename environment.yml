@@ -9,6 +9,11 @@ dependencies:
   - pytorch>=2.0.0
   - torchvision>=0.15.0
   - pip
+  - ipykernel>=6.29.5
+  - matplotlib>=3.7.5
+  - pytest>=7.0.0
+  - black>=23.0.0
+  - ruff>=0.1.0
   - pip:
     - einops>=0.7.0
     - pillow>=9.0.0
