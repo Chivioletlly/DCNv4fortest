@@ -11,3 +11,4 @@ checkpoints/
 inference_results/
 results/
 test_images/
+tensorboard/

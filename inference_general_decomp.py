@@ -71,6 +71,10 @@ class GeneralDecompositionInference:
                 reconstructed = (pattern + background).clamp(0, 1)
 
                 B = inp.shape[0]
+                # Get degradation types from batch (as list)
+                deg_types = batch.get('degradation_type', [None] * B)
+                filenames = batch.get('filename', [None] * B)
+
                 for j in range(B):
                     grid = vutils.make_grid(
                         torch.cat([
@@ -82,10 +86,15 @@ class GeneralDecompositionInference:
                         nrow=4, normalize=True, padding=2,
                     )
                     idx = i * B + j
-                    out_path = os.path.join(save_dir, f'inference_{idx:04d}.png')
+                    deg_type = deg_types[j] if isinstance(deg_types, list) else deg_types
+                    fname = filenames[j] if isinstance(filenames, list) else filenames
+                    # Build filename: inference_{idx:04d}_{deg_type}_{stem}.png
+                    deg_suffix = f'_{deg_type}' if deg_type else ''
+                    stem_suffix = f'_{fname}' if fname else ''
+                    out_path = os.path.join(save_dir, f'inference_{deg_suffix}{stem_suffix}.png')
                     vutils.save_image(grid, out_path)
                     print(f'Saved: {out_path}')
-                    self._display(grid, idx)
+                    self._display(grid, f'{deg_suffix}')
 
     # ------------------------------------------------------------------
     # Single-image inference
