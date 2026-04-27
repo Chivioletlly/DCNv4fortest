@@ -135,11 +135,20 @@ class GeneralDecompositionTrainer:
     # Train / validate
     # ------------------------------------------------------------------
 
-    def _forward_and_loss(self, inp, bg_gt, pattern_gt):
+    def _forward_and_loss(self, inp, bg_gt, pattern_gt,deg_type):
         pattern, background, orth_loss = self.model(inp)
         total_loss, loss_dict = self.criterion(
             pattern, background, orth_loss, inp, pattern_gt, bg_gt
         )
+
+
+        if deg_type == 'rain' and 'bg_l2' in loss_dict:
+            rain_multiplier = 10.0
+            total_loss = total_loss + (rain_multiplier - self.config.get('w_bg', 1.0))* loss_dict['bg_l2']
+            loss_dict['bg_l2'] = loss_dict['bg_l2'] * rain_multiplier
+
+
+
         return pattern, background, total_loss, loss_dict
 
     def train_epoch(self, epoch: int) -> Dict:
@@ -153,7 +162,7 @@ class GeneralDecompositionTrainer:
 
                 self.optimizer.zero_grad()
                 pattern, background, total_loss, loss_dict = self._forward_and_loss(
-                    inp, bg_gt, pattern_gt
+                    inp, bg_gt, pattern_gt , deg_type
                 )
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -194,7 +203,7 @@ class GeneralDecompositionTrainer:
             for batch in tqdm(self.val_loader, desc='Validating'):
                 inp, bg_gt, pattern_gt, deg_type = self._unpack_batch(batch, self.device)
                 pattern, background, total_loss, loss_dict = self._forward_and_loss(
-                    inp, bg_gt, pattern_gt
+                    inp, bg_gt, pattern_gt,deg_type
                 )
                 for k, v in loss_dict.items():
                     if isinstance(v, torch.Tensor):
@@ -300,7 +309,7 @@ class GeneralDecompositionTrainer:
                 if i >= num_samples:
                     break
                 inp, bg_gt, pattern_gt, deg_type = self._unpack_batch(batch, self.device)
-                pattern, background, _, _ = self._forward_and_loss(inp, bg_gt, pattern_gt)
+                pattern, background, _, _ = self._forward_and_loss(inp, bg_gt, pattern_gt,deg_type)
                 reconstructed = (pattern + background).clamp(0, 1)
 
                 # Build visualisation row: input | pattern | bg | reconstructed [| GT bg | GT pattern]
