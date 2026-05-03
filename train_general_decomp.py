@@ -21,7 +21,7 @@ from general_decomp.dataset import build_dataloader
 class GeneralDecompositionTrainer:
 
     def __init__(self, config: Dict):
-        self.config = config
+        self.config = config  
         self.device = torch.device(
             config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
         )
@@ -36,7 +36,9 @@ class GeneralDecompositionTrainer:
             w_pattern=config.get('w_pattern', 1.0),
             w_bg=config.get('w_bg', 1.0),
             w_recon=config.get('w_recon', 1.0),
+            w_ssim=config.get('w_ssim', 0.5),
         ).to(self.device)
+            
 
         self.optimizer = optim.AdamW(
             self.model.parameters(),
@@ -142,10 +144,10 @@ class GeneralDecompositionTrainer:
         )
 
 
-        if deg_type == 'rain' and 'bg_l2' in loss_dict:
-            rain_multiplier = 10.0
-            total_loss = total_loss + (rain_multiplier - self.config.get('w_bg', 1.0))* loss_dict['bg_l2']
-            loss_dict['bg_l2'] = loss_dict['bg_l2'] * rain_multiplier
+        # if deg_type == 'rain' and 'bg_l2' in loss_dict:
+        #     rain_multiplier = 10.0
+        #     total_loss = total_loss + (rain_multiplier - self.config.get('w_bg', 1.0))* loss_dict['bg_l2']
+        #     loss_dict['bg_l2'] = loss_dict['bg_l2'] * rain_multiplier
 
 
 
@@ -181,7 +183,7 @@ class GeneralDecompositionTrainer:
 
                 pbar.set_postfix({
                     'loss':  f'{total_loss.item():.4f}',
-                    'recon': f'{loss_dict.get("recon_l2", 0):.4f}',
+                    'recon': f'{loss_dict.get("recon_l1", 0):.4f}',
                     'orth':  f'{loss_dict.get("orthogonal", 0):.4f}',
                     'lr':    f'{self.optimizer.param_groups[0]["lr"]:.2e}',
                 })
@@ -406,7 +408,7 @@ def parse_args():
     parser.add_argument('--w_pattern',    type=float, default=1.0)
     parser.add_argument('--w_bg',         type=float, default=1.0)
     parser.add_argument('--w_recon',      type=float, default=1.0)
-
+    parser.add_argument('--w_ssim',       type=float, default=0.5)
     # Model
     parser.add_argument('--in_channels',   type=int, default=3)
     parser.add_argument('--base_channels', type=int, default=64)

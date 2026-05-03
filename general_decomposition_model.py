@@ -198,6 +198,67 @@ class GeneralDecompositionNet(nn.Module):
         background = self.bg_head(bg_refined)
 
         return pattern, background, orth_loss
+##replace l2 with l1 loss, and add SSIM loss for better perceptual quality in rain degradation.
+
+##realize ssim loss 
+def gaussian(window_size, sigma):
+    gauss = torch.Tensor([torch.exp(torch.tensor(-(x - window_size//2)**2/float(2*sigma**2))) for x in range(window_size)])
+    return gauss/gauss.sum()
+
+def create_window(window_size, channel=1):
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+    return window
+
+def ssim(img1, img2, window_size=11, window=None, size_average=True, full=False, val_range=1.0):
+    img1 = img1.clamp(0, 1)
+    img2 = img2.clamp(0, 1)
+
+    (_, channel, height, width) = img1.size()
+    if window is None:
+        window = create_window(window_size, channel).to(img1.device)
+
+    mu1 = F.conv2d(img1, window, padding=window_size//2, groups=channel)
+    mu2 = F.conv2d(img2, window, padding=window_size//2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1*img1, window, padding=window_size//2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(img2*img2, window, padding=window_size//2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(img1*img2, window, padding=window_size//2, groups=channel) - mu1_mu2
+
+    C1 = (0.01 * val_range) **2
+    C2 = (0.03 * val_range)** 2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map.mean(1).mean(1).mean(1)
+
+class SSIM(nn.Module):
+    def __init__(self, window_size=11, val_range=1.0):
+        super().__init__()
+        self.window_size = window_size
+        self.val_range = val_range
+        self.window = None
+
+    def forward(self, x, y):
+        if self.window is None or self.window.device != x.device:
+            self.window = create_window(self.window_size, x.size(1)).to(x.device)
+        return ssim(x, y, window=self.window, val_range=self.val_range)
+
+class SSIMLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ssim = SSIM()
+
+    def forward(self, pred, target):
+        return 1.0 - self.ssim(pred, target)
 
 
 class DecompositionLoss(nn.Module):
@@ -212,18 +273,23 @@ class DecompositionLoss(nn.Module):
     All supervised terms are optional; when GT is not provided they are skipped.
     """
 
+
     def __init__(
         self,
         w_orthogonal: float = 0.1,
         w_pattern:    float = 1.0,
         w_bg:         float = 1.0,
         w_recon:      float = 1.0,
+        w_ssim:       float = 0.5,  # optional SSIM loss weight
+
     ):
         super().__init__()
         self.w_orthogonal = w_orthogonal
         self.w_pattern    = w_pattern
         self.w_bg         = w_bg
         self.w_recon      = w_recon
+        self.w_ssim       = w_ssim
+        self.ssim_loss = SSIMLoss()
 
     def forward(
         self,
@@ -242,20 +308,46 @@ class DecompositionLoss(nn.Module):
         losses['orthogonal'] = orth_loss
         total = total + self.w_orthogonal * orth_loss
 
-        # 2. Pattern L2
+        # # 2. Pattern L2
+        # if pattern_gt is not None:
+        #     losses['pattern_l2'] = F.mse_loss(pattern, pattern_gt)
+        #     total = total + self.w_pattern * losses['pattern_l2']
+
+        # 2. Pattern L1 + SSIM
         if pattern_gt is not None:
-            losses['pattern_l2'] = F.mse_loss(pattern, pattern_gt)
-            total = total + self.w_pattern * losses['pattern_l2']
+            losses['pattern_l1'] = F.l1_loss(pattern, pattern_gt)
+            total = total + self.w_pattern * losses['pattern_l1']
+            losses['pattern_ssim'] = self.ssim_loss(pattern, pattern_gt)
+            total +=self.w_pattern * self.w_ssim * losses['pattern_ssim'] 
 
-        # 3. Background L2
-        if bg_gt is not None:
-            losses['bg_l2'] = F.mse_loss(background, bg_gt)
-            total = total + self.w_bg * losses['bg_l2']
+            
+   
+            
 
-        # 4. Additive reconstruction L2:  pattern + background ≈ input
+
+        # # 3. Background L2
+        # if bg_gt is not None:
+        #     losses['bg_l2'] = F.mse_loss(background, bg_gt)
+        #     total = total + self.w_bg * losses['bg_l2']
+        # 3. Background L1 + SSIM
+        if bg_gt is not None:   
+            losses['bg_l1'] = F.l1_loss(background, bg_gt)
+            total = total + self.w_bg * losses['bg_l1']
+            losses['bg_ssim'] = self.ssim_loss(background, bg_gt)
+            total += self.w_bg * self.w_ssim * losses['bg_ssim']
+            
+
+        # # 4. Additive reconstruction L2:  pattern + background ≈ input
+        # reconstruction = (pattern + background).clamp(0, 1)
+        # losses['recon_l2'] = F.mse_loss(reconstruction, input_image)
+        # total = total + self.w_recon * losses['recon_l2']
+
+        # 4. Additive reconstruction L1 + SSIM
         reconstruction = (pattern + background).clamp(0, 1)
-        losses['recon_l2'] = F.mse_loss(reconstruction, input_image)
-        total = total + self.w_recon * losses['recon_l2']
+        losses['recon_l1'] = F.l1_loss(reconstruction, input_image)
+        total = total + self.w_recon * losses['recon_l1']
+        losses['recon_ssim'] = self.ssim_loss(reconstruction, input_image)
+        total += self.w_recon * self.w_ssim * losses['recon_ssim']
 
         losses['total'] = total
         return total, losses
