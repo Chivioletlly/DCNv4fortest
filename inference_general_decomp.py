@@ -24,8 +24,9 @@ from general_decomp.dataset import build_dataloader
 
 class GeneralDecompositionInference:
 
-    def __init__(self, checkpoint_path: str, device: str = 'cuda'):
+    def __init__(self, checkpoint_path: str, bottleneck_type: str = 'conv', device: str = 'cuda'):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.bottleneck_type = bottleneck_type
 
         ckpt = torch.load(checkpoint_path, map_location=self.device)
         self.config = ckpt.get('config', {})
@@ -33,13 +34,15 @@ class GeneralDecompositionInference:
         self.model = GeneralDecompositionNet(
             in_channels=self.config.get('in_channels', 3),
             base_channels=self.config.get('base_channels', 64),
+            bottleneck_type=self.bottleneck_type,
         )
         self.model.load_state_dict(ckpt['model_state_dict'])
         self.model.to(self.device).eval()
 
         print(f'Model loaded from {checkpoint_path}')
         print(f'Config: in_channels={self.config.get("in_channels",3)}, '
-              f'base_channels={self.config.get("base_channels",64)}')
+              f'base_channels={self.config.get("base_channels",64)}, '
+              f'bottleneck_type={self.bottleneck_type}')
 
     # ------------------------------------------------------------------
     # Dataset-level inference
@@ -167,13 +170,16 @@ def parse_args():
     parser.add_argument('--save_dir',    type=str,
                         default='./inference_results/general_decomp')
     parser.add_argument('--device',      type=str, default='cuda')
+    parser.add_argument('--bottleneck_type', type=str, default='conv',
+                        choices=['conv', 'transformer'],
+                        help='Bottleneck type: conv (fast) or transformer (accurate)')
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    inferencer = GeneralDecompositionInference(args.checkpoint, args.device)
+    inferencer = GeneralDecompositionInference(args.checkpoint, args.bottleneck_type, args.device)
 
     if args.input_dir:
         loader = inferencer.create_dataloader(args.input_dir, args.batch_size)
