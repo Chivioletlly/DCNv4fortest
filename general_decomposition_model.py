@@ -59,6 +59,34 @@ class TransformerBottleneck(nn.Module):
         return self.out_proj(x)
 
 
+class ConvBottleneck(nn.Module):
+    """Fast CNN-based bottleneck as an alternative to TransformerBottleneck."""
+
+    def __init__(self, channels, num_layers=4, dilation_rates=None):
+        super().__init__()
+        if dilation_rates is None:
+            dilation_rates = [1, 2, 4, 2][:num_layers]
+
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            dil = dilation_rates[i]
+            self.layers.append(
+                nn.Sequential(
+                    nn.Conv2d(channels, channels, 3, padding=dil, dilation=dil, bias=False),
+                    nn.BatchNorm2d(channels),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(channels, channels, 3, padding=dil, dilation=dil, bias=False),
+                    nn.BatchNorm2d(channels),
+                )
+            )
+        self.out_proj = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = x + layer(x)
+        return self.out_proj(x)
+
+
 class UNetEncoder(nn.Module):
     def __init__(self, in_channels, base_channels=64):
         super().__init__()
@@ -148,15 +176,20 @@ class FeatureDisentanglement(nn.Module):
 
 
 class GeneralDecompositionNet(nn.Module):
-    
 
-    def __init__(self, in_channels: int = 3, base_channels: int = 64):
+
+    def __init__(self, in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv"):
         super().__init__()
         bc = base_channels
 
-        self.encoder   = UNetEncoder(in_channels, bc)
-        self.bottleneck = TransformerBottleneck(bc * 8, num_heads=8, num_layers=4)
-        self.decoder   = UNetDecoder(bc)
+        self.encoder = UNetEncoder(in_channels, bc)
+        if bottleneck_type == "conv":
+            self.bottleneck = ConvBottleneck(bc * 8, num_layers=4)
+        elif bottleneck_type == "transformer":
+            self.bottleneck = TransformerBottleneck(bc * 8, num_heads=8, num_layers=4)
+        else:
+            raise ValueError(f"Unknown bottleneck_type: {bottleneck_type}")
+        self.decoder = UNetDecoder(bc)
 
         self.disentangle = FeatureDisentanglement(bc)
 
@@ -353,8 +386,8 @@ class DecompositionLoss(nn.Module):
         return total, losses
 
 
-def create_model(in_channels: int = 3, base_channels: int = 64) -> GeneralDecompositionNet:
-    return GeneralDecompositionNet(in_channels=in_channels, base_channels=base_channels)
+def create_model(in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv") -> GeneralDecompositionNet:
+    return GeneralDecompositionNet(in_channels=in_channels, base_channels=base_channels, bottleneck_type=bottleneck_type)
 
 
 def count_parameters(model: nn.Module) -> dict:

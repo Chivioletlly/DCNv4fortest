@@ -29,6 +29,7 @@ class GeneralDecompositionTrainer:
         self.model = GeneralDecompositionNet(
             in_channels=config.get('in_channels', 3),
             base_channels=config.get('base_channels', 64),
+            bottleneck_type=config.get('bottleneck_type', 'conv'),
         ).to(self.device)
 
         self.criterion = DecompositionLoss(
@@ -412,6 +413,9 @@ def parse_args():
     # Model
     parser.add_argument('--in_channels',   type=int, default=3)
     parser.add_argument('--base_channels', type=int, default=64)
+    parser.add_argument('--bottleneck_type', type=str, default='conv',
+                        choices=['conv', 'transformer'],
+                        help='Bottleneck type: conv (fast) or transformer (accurate)')
     parser.add_argument('--image_height',  type=int, default=512)
     parser.add_argument('--image_width',   type=int, default=512)
 
