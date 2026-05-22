@@ -293,6 +293,118 @@ class SSIMLoss(nn.Module):
     def forward(self, pred, target):
         return 1.0 - self.ssim(pred, target)
 
+def frequency_high_freq_loss(pred, target, high_freq_ratio=0.3):
+    """
+    频域高频损失函数 - 增强高频细节恢复
+    
+    Args:
+        pred: 预测图像 [B, C, H, W]
+        target: 目标图像 [B, C, H, W]
+        high_freq_ratio: 高频区域比例 (0-1), 控制高频提取的范围
+    
+    Returns:
+        高频损失值
+    """
+    # 确保输入在合理范围内
+    pred = pred.clamp(0, 1)
+    target = target.clamp(0, 1)
+    
+    batch_size, channels, height, width = pred.shape
+    
+    # 计算2D傅里叶变换
+    def compute_dft(img):
+        # 转换到频域
+        dft = torch.fft.fft2(img, dim=(-2, -1))
+        # 移到中心便于处理
+        dft_shifted = torch.fft.fftshift(dft, dim=(-2, -1))
+        return dft_shifted
+    
+    # 创建高频掩码
+    def create_high_freq_mask(h, w, ratio):
+        mask = torch.ones(h, w, device=pred.device)
+        center_h, center_w = h // 2, w // 2
+        
+        # 计算要屏蔽的低频区域大小
+        low_freq_size_h = int(h * ratio)
+        low_freq_size_w = int(w * ratio)
+        
+        # 确保大小为奇数，以中心对称
+        low_freq_size_h = low_freq_size_h if low_freq_size_h % 2 == 1 else low_freq_size_h + 1
+        low_freq_size_w = low_freq_size_w if low_freq_size_w % 2 == 1 else low_freq_size_w + 1
+        
+        # 屏蔽中心低频区域
+        start_h = center_h - low_freq_size_h // 2
+        end_h = center_h + low_freq_size_h // 2 + 1
+        start_w = center_w - low_freq_size_w // 2
+        end_w = center_w + low_freq_size_w // 2 + 1
+        
+        mask[start_h:end_h, start_w:end_w] = 0
+        return mask
+    
+    # 计算DFT
+    pred_dft = compute_dft(pred)
+    target_dft = compute_dft(target)
+    
+    # 创建高频掩码
+    high_freq_mask = create_high_freq_mask(height, width, high_freq_ratio)
+    high_freq_mask = high_freq_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+    
+    # 提取高频成分
+    pred_high_freq = pred_dft * high_freq_mask
+    target_high_freq = target_dft * high_freq_mask
+    
+    # 计算幅度谱损失
+    pred_magnitude = torch.abs(pred_high_freq)
+    target_magnitude = torch.abs(target_high_freq)
+    
+    # 使用L1损失计算高频差异
+    freq_loss = F.l1_loss(pred_magnitude, target_magnitude)
+    
+    return freq_loss
+
+def gradient_edge_loss(pred, target):
+    """
+    梯度边缘损失函数 - 保留图像边缘细节
+    
+    Args:
+        pred: 预测图像 [B, C, H, W]
+        target: 目标图像 [B, C, H, W]
+    
+    Returns:
+        边缘损失值
+    """
+    def compute_sobel_gradients(img):
+        # Sobel算子
+        sobel_x = torch.tensor([[[[1, 0, -1], [2, 0, -2], [1, 0, -1]]]], 
+                              dtype=torch.float32, device=img.device)
+        sobel_y = torch.tensor([[[[1, 2, 1], [0, 0, 0], [-1, -2, -1]]]], 
+                              dtype=torch.float32, device=img.device)
+        
+        # 对每个通道分别计算梯度
+        grad_x_list = []
+        grad_y_list = []
+        
+        for c in range(img.shape[1]):
+            channel = img[:, c:c+1, :, :]
+            grad_x = F.conv2d(channel, sobel_x, padding=1)
+            grad_y = F.conv2d(channel, sobel_y, padding=1)
+            grad_x_list.append(grad_x)
+            grad_y_list.append(grad_y)
+        
+        grad_x = torch.cat(grad_x_list, dim=1)
+        grad_y = torch.cat(grad_y_list, dim=1)
+        
+        # 计算梯度幅值
+        gradient_magnitude = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
+        return gradient_magnitude
+    
+    pred_grad = compute_sobel_gradients(pred)
+    target_grad = compute_sobel_gradients(target)
+    
+    # 使用L1损失保持边缘
+    edge_loss = F.l1_loss(pred_grad, target_grad)
+    
+    return edge_loss
 
 class DecompositionLoss(nn.Module):
     """
@@ -314,7 +426,8 @@ class DecompositionLoss(nn.Module):
         w_bg:         float = 1.0,
         w_recon:      float = 1.0,
         w_ssim:       float = 0.5,  # optional SSIM loss weight
-
+        w_frequency:    float = 0.2,  # optional frequency-domain loss weight (not implemented here)
+        w_edge:         float = 0.2,  # optional edge loss weight (not implemented here
     ):
         super().__init__()
         self.w_orthogonal = w_orthogonal
@@ -323,6 +436,9 @@ class DecompositionLoss(nn.Module):
         self.w_recon      = w_recon
         self.w_ssim       = w_ssim
         self.ssim_loss = SSIMLoss()
+        self.w_frequency = w_frequency
+        self.w_edge = w_edge
+
 
     def forward(
         self,
@@ -351,7 +467,11 @@ class DecompositionLoss(nn.Module):
             losses['pattern_l1'] = F.l1_loss(pattern, pattern_gt)
             total = total + self.w_pattern * losses['pattern_l1']
             losses['pattern_ssim'] = self.ssim_loss(pattern, pattern_gt)
-            total +=self.w_pattern * self.w_ssim * losses['pattern_ssim'] 
+            total +=self.w_pattern * self.w_ssim * losses['pattern_ssim']
+            losses['pattern_freq'] = frequency_high_freq_loss(pattern, pattern_gt,high_freq_ratio=0.3)
+            total += self.w_pattern * self.w_frequency * losses['pattern_freq']
+            losses['pattern_edge'] = gradient_edge_loss(pattern, pattern_gt)
+            total += self.w_pattern * self.w_edge * losses['pattern_edge'] 
 
             
    
@@ -368,7 +488,10 @@ class DecompositionLoss(nn.Module):
             total = total + self.w_bg * losses['bg_l1']
             losses['bg_ssim'] = self.ssim_loss(background, bg_gt)
             total += self.w_bg * self.w_ssim * losses['bg_ssim']
-            
+            losses['bg_freq'] = frequency_high_freq_loss(background, bg_gt,high_freq_ratio=0.3)
+            total += self.w_bg * self.w_frequency * losses['bg_freq']
+            losses['bg_edge'] = gradient_edge_loss(background, bg_gt)
+            total += self.w_bg * self.w_edge * losses['bg_edge']
 
         # # 4. Additive reconstruction L2:  pattern + background ≈ input
         # reconstruction = (pattern + background).clamp(0, 1)
@@ -381,6 +504,10 @@ class DecompositionLoss(nn.Module):
         total = total + self.w_recon * losses['recon_l1']
         losses['recon_ssim'] = self.ssim_loss(reconstruction, input_image)
         total += self.w_recon * self.w_ssim * losses['recon_ssim']
+        losses['recon_freq'] = frequency_high_freq_loss(reconstruction, input_image)
+        total += self.w_recon * self.w_frequency * losses['recon_freq']
+        losses['recon_edge'] = gradient_edge_loss(reconstruction, input_image)
+        total += self.w_recon * self.w_edge * losses['recon_edge']
 
         losses['total'] = total
         return total, losses
