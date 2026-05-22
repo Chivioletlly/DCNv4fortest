@@ -374,29 +374,15 @@ def gradient_edge_loss(pred, target):
         边缘损失值
     """
     def compute_sobel_gradients(img):
-        # Sobel算子
-        sobel_x = torch.tensor([[[[1, 0, -1], [2, 0, -2], [1, 0, -1]]]], 
-                              dtype=torch.float32, device=img.device)
-        sobel_y = torch.tensor([[[[1, 2, 1], [0, 0, 0], [-1, -2, -1]]]], 
-                              dtype=torch.float32, device=img.device)
+        C = img.shape[1]
+        # 一次性创建并利用 groups=C 实现全通道并行
+        kernel_x = torch.tensor([[[[1, 0, -1], [2, 0, -2], [1, 0, -1]]]], dtype=torch.float32, device=img.device).repeat(C, 1, 1, 1)
+        kernel_y = torch.tensor([[[[1, 2, 1], [0, 0, 0], [-1, -2, -1]]]], dtype=torch.float32, device=img.device).repeat(C, 1, 1, 1)
         
-        # 对每个通道分别计算梯度
-        grad_x_list = []
-        grad_y_list = []
+        grad_x = F.conv2d(img, kernel_x, padding=1, groups=C)
+        grad_y = F.conv2d(img, kernel_y, padding=1, groups=C)
         
-        for c in range(img.shape[1]):
-            channel = img[:, c:c+1, :, :]
-            grad_x = F.conv2d(channel, sobel_x, padding=1)
-            grad_y = F.conv2d(channel, sobel_y, padding=1)
-            grad_x_list.append(grad_x)
-            grad_y_list.append(grad_y)
-        
-        grad_x = torch.cat(grad_x_list, dim=1)
-        grad_y = torch.cat(grad_y_list, dim=1)
-        
-        # 计算梯度幅值
-        gradient_magnitude = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
-        return gradient_magnitude
+        return torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
     
     pred_grad = compute_sobel_gradients(pred)
     target_grad = compute_sobel_gradients(target)
