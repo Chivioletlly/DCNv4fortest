@@ -30,6 +30,8 @@ class GeneralDecompositionTrainer:
             in_channels=config.get('in_channels', 3),
             base_channels=config.get('base_channels', 64),
             bottleneck_type=config.get('bottleneck_type', 'conv'),
+            use_orient_block=config.get('use_orient_block', False),
+            use_attention_gate=config.get('use_attention_gate', False),
         ).to(self.device)
 
         self.criterion = DecompositionLoss(
@@ -38,6 +40,8 @@ class GeneralDecompositionTrainer:
             w_bg=config.get('w_bg', 1.0),
             w_recon=config.get('w_recon', 1.0),
             w_ssim=config.get('w_ssim', 0.5),
+            w_frequency=config.get('w_frequency', 0.2),
+            w_edge=config.get('w_edge', 0.2),
         ).to(self.device)
             
 
@@ -410,12 +414,18 @@ def parse_args():
     parser.add_argument('--w_bg',         type=float, default=1.0)
     parser.add_argument('--w_recon',      type=float, default=1.0)
     parser.add_argument('--w_ssim',       type=float, default=0.5)
+    parser.add_argument('--w_frequency',   type=float, default=0.2)
+    parser.add_argument('--w_edge',        type=float, default=0.2)
     # Model
     parser.add_argument('--in_channels',   type=int, default=3)
     parser.add_argument('--base_channels', type=int, default=64)
     parser.add_argument('--bottleneck_type', type=str, default='conv',
                         choices=['conv', 'transformer'],
                         help='Bottleneck type: conv (fast) or transformer (accurate)')
+    parser.add_argument('--use_orient_block', action='store_true',
+                        help='Use OrientationAwareBlock in encoder and pattern branch')
+    parser.add_argument('--use_attention_gate', action='store_true',
+                        help='Use RainAttentionGate in decoder skip connections')
     parser.add_argument('--image_height',  type=int, default=512)
     parser.add_argument('--image_width',   type=int, default=512)
 

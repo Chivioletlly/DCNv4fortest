@@ -59,9 +59,83 @@ class TransformerBottleneck(nn.Module):
         return self.out_proj(x)
 
 
-class ConvBottleneck(nn.Module):
-    """Fast CNN-based bottleneck as an alternative to TransformerBottleneck."""
+class OrientationAwareBlock(nn.Module):
+    def __init__(self, channels, num_orientations=4):
+        super().__init__()
+        self.num_orientations = num_orientations
+        per_orient = channels // num_orientations
+        self.per_orient = per_orient
 
+        self.directional_convs = nn.ModuleList([
+            self._make_orient_conv(per_orient, angle)
+            for angle in range(num_orientations)
+        ])
+        self.fusion = nn.Sequential(
+            nn.Conv2d(per_orient * num_orientations, channels, 1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.channel_adjust = None
+
+    @staticmethod
+    def _make_orient_conv(channels, angle_idx):
+        kernel_sizes = [(1, 7), (1, 11), (1, 15), (1, 21)]
+        k = kernel_sizes[angle_idx % len(kernel_sizes)]
+        return nn.Sequential(
+            nn.Conv2d(channels, channels, k, padding=(k[0]//2, k[1]//2), bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        C = x.shape[1]
+        if C < self.num_orientations:
+            return x
+        usable = self.per_orient * self.num_orientations
+        if C != usable:
+            if self.channel_adjust is None or self.channel_adjust.in_channels != C:
+                self.channel_adjust = nn.Conv2d(C, usable, 1, bias=False).to(x.device)
+            x_in = self.channel_adjust(x)
+        else:
+            x_in = x
+
+        parts = x_in.split(self.per_orient, dim=1)
+        out_parts = [conv(part) for conv, part in zip(self.directional_convs, parts)]
+        out = torch.cat(out_parts, dim=1)
+        out = self.fusion(out)
+
+        if out.shape[1] != C:
+            return out
+        return out + x
+
+
+class RainAttentionGate(nn.Module):
+    def __init__(self, F_g, F_l, F_int):
+        super().__init__()
+        self.W_g = nn.Sequential(
+            nn.Conv2d(F_g, F_int, 1, bias=False),
+            nn.BatchNorm2d(F_int),
+        )
+        self.W_x = nn.Sequential(
+            nn.Conv2d(F_l, F_int, 1, bias=False),
+            nn.BatchNorm2d(F_int),
+        )
+        self.psi = nn.Sequential(
+            nn.Conv2d(F_int, 1, 1, bias=False),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid(),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        psi = self.relu(g1 + x1)
+        psi = self.psi(psi)
+        return x * psi
+
+
+class ConvBottleneck(nn.Module):
     def __init__(self, channels, num_layers=4, dilation_rates=None):
         super().__init__()
         if dilation_rates is None:
@@ -88,14 +162,20 @@ class ConvBottleneck(nn.Module):
 
 
 class UNetEncoder(nn.Module):
-    def __init__(self, in_channels, base_channels=64):
+    def __init__(self, in_channels, base_channels=64, use_orient_block=False):
         super().__init__()
         bc = base_channels
+        self.use_orient_block = use_orient_block
         self.enc1 = self._block(in_channels, bc,      dilation=1)
         self.enc2 = self._block(bc,          bc * 2,  dilation=2)
         self.enc3 = self._block(bc * 2,      bc * 4,  dilation=4)
         self.enc4 = self._block(bc * 4,      bc * 8,  dilation=2)
         self.pool = nn.MaxPool2d(2)
+
+        if use_orient_block:
+            self.orient2 = OrientationAwareBlock(bc * 2,  num_orientations=4)
+            self.orient3 = OrientationAwareBlock(bc * 4,  num_orientations=4)
+            self.orient4 = OrientationAwareBlock(bc * 8,  num_orientations=4)
 
     @staticmethod
     def _block(in_ch, out_ch, dilation):
@@ -110,21 +190,33 @@ class UNetEncoder(nn.Module):
     def forward(self, x):
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
+        if self.use_orient_block:
+            e2 = self.orient2(e2)
         e3 = self.enc3(self.pool(e2))
+        if self.use_orient_block:
+            e3 = self.orient3(e3)
         e4 = self.enc4(self.pool(e3))
+        if self.use_orient_block:
+            e4 = self.orient4(e4)
         return [e1, e2, e3, e4]
 
 
 class UNetDecoder(nn.Module):
-    def __init__(self, base_channels=64):
+    def __init__(self, base_channels=64, use_attention_gate=False):
         super().__init__()
         bc = base_channels
+        self.use_attention_gate = use_attention_gate
         self.up4 = nn.ConvTranspose2d(bc * 8, bc * 4, 4, stride=2, padding=1, bias=False)
         self.up3 = nn.ConvTranspose2d(bc * 4, bc * 2, 4, stride=2, padding=1, bias=False)
         self.up2 = nn.ConvTranspose2d(bc * 2, bc,     4, stride=2, padding=1, bias=False)
         self.dec4 = self._block(bc * 8, bc * 4)
         self.dec3 = self._block(bc * 4, bc * 2)
         self.dec2 = self._block(bc * 2, bc)
+
+        if use_attention_gate:
+            self.ag3 = RainAttentionGate(F_g=bc * 4, F_l=bc * 4, F_int=bc * 2)
+            self.ag2 = RainAttentionGate(F_g=bc * 2, F_l=bc * 2, F_int=bc)
+            self.ag1 = RainAttentionGate(F_g=bc,     F_l=bc,     F_int=bc // 2)
 
     @staticmethod
     def _block(in_ch, out_ch):
@@ -137,16 +229,25 @@ class UNetDecoder(nn.Module):
 
     def forward(self, bottleneck, enc_feats):
         e1, e2, e3 = enc_feats
-        x = self.dec4(torch.cat([self.up4(bottleneck), e3], dim=1))
-        x = self.dec3(torch.cat([self.up3(x),          e2], dim=1))
-        x = self.dec2(torch.cat([self.up2(x),          e1], dim=1))
+        g4 = self.up4(bottleneck)
+        if self.use_attention_gate:
+            e3 = self.ag3(g4, e3)
+        x = self.dec4(torch.cat([g4, e3], dim=1))
+
+        g3 = self.up3(x)
+        if self.use_attention_gate:
+            e2 = self.ag2(g3, e2)
+        x = self.dec3(torch.cat([g3, e2], dim=1))
+
+        g2 = self.up2(x)
+        if self.use_attention_gate:
+            e1 = self.ag1(g2, e1)
+        x = self.dec2(torch.cat([g2, e1], dim=1))
         return x
 
 
 class FeatureDisentanglement(nn.Module):
-    """Split decoded features into two orthogonal branches."""
-
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, use_orient_block=False):
         super().__init__()
         half = in_channels // 2
         self.pattern_branch = nn.Sequential(
@@ -157,6 +258,9 @@ class FeatureDisentanglement(nn.Module):
             nn.Conv2d(in_channels, half, 3, padding=1), nn.ReLU(inplace=True),
             nn.Conv2d(half,        half, 3, padding=1), nn.ReLU(inplace=True),
         )
+        self.use_orient_block = use_orient_block
+        if use_orient_block:
+            self.orient_pattern = OrientationAwareBlock(half, num_orientations=4)
 
     @staticmethod
     def orthogonal_loss(a, b):
@@ -171,6 +275,8 @@ class FeatureDisentanglement(nn.Module):
     def forward(self, x):
         pat_feat = self.pattern_branch(x)
         bg_feat  = self.bg_branch(x)
+        if self.use_orient_block:
+            pat_feat = self.orient_pattern(pat_feat)
         orth_loss = self.orthogonal_loss(pat_feat, bg_feat)
         return pat_feat, bg_feat, orth_loss
 
@@ -178,20 +284,22 @@ class FeatureDisentanglement(nn.Module):
 class GeneralDecompositionNet(nn.Module):
 
 
-    def __init__(self, in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv"):
+    def __init__(self, in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv", use_orient_block: bool = False, use_attention_gate: bool = False):
         super().__init__()
         bc = base_channels
+        self.use_orient_block = use_orient_block
+        self.use_attention_gate = use_attention_gate
 
-        self.encoder = UNetEncoder(in_channels, bc)
+        self.encoder = UNetEncoder(in_channels, bc, use_orient_block=use_orient_block)
         if bottleneck_type == "conv":
             self.bottleneck = ConvBottleneck(bc * 8, num_layers=4)
         elif bottleneck_type == "transformer":
             self.bottleneck = TransformerBottleneck(bc * 8, num_heads=8, num_layers=4)
         else:
             raise ValueError(f"Unknown bottleneck_type: {bottleneck_type}")
-        self.decoder = UNetDecoder(bc)
+        self.decoder = UNetDecoder(bc, use_attention_gate=use_attention_gate)
 
-        self.disentangle = FeatureDisentanglement(bc)
+        self.disentangle = FeatureDisentanglement(bc, use_orient_block=use_orient_block)
 
         half = bc // 2
 
@@ -513,8 +621,8 @@ class DecompositionLoss(nn.Module):
         return total, losses
 
 
-def create_model(in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv") -> GeneralDecompositionNet:
-    return GeneralDecompositionNet(in_channels=in_channels, base_channels=base_channels, bottleneck_type=bottleneck_type)
+def create_model(in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv", use_orient_block: bool = False, use_attention_gate: bool = False) -> GeneralDecompositionNet:
+    return GeneralDecompositionNet(in_channels=in_channels, base_channels=base_channels, bottleneck_type=bottleneck_type, use_orient_block=use_orient_block, use_attention_gate=use_attention_gate)
 
 
 def count_parameters(model: nn.Module) -> dict:
