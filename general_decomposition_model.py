@@ -109,32 +109,6 @@ class OrientationAwareBlock(nn.Module):
         return out + x
 
 
-class RainAttentionGate(nn.Module):
-    def __init__(self, F_g, F_l, F_int):
-        super().__init__()
-        self.W_g = nn.Sequential(
-            nn.Conv2d(F_g, F_int, 1, bias=False),
-            nn.BatchNorm2d(F_int),
-        )
-        self.W_x = nn.Sequential(
-            nn.Conv2d(F_l, F_int, 1, bias=False),
-            nn.BatchNorm2d(F_int),
-        )
-        self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, 1, bias=False),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid(),
-        )
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, g, x):
-        g1 = self.W_g(g)
-        x1 = self.W_x(x)
-        psi = self.relu(g1 + x1)
-        psi = self.psi(psi)
-        return x * psi
-
-
 class ConvBottleneck(nn.Module):
     def __init__(self, channels, num_layers=4, dilation_rates=None):
         super().__init__()
@@ -202,21 +176,15 @@ class UNetEncoder(nn.Module):
 
 
 class UNetDecoder(nn.Module):
-    def __init__(self, base_channels=64, use_attention_gate=False):
+    def __init__(self, base_channels=64):
         super().__init__()
         bc = base_channels
-        self.use_attention_gate = use_attention_gate
         self.up4 = nn.ConvTranspose2d(bc * 8, bc * 4, 4, stride=2, padding=1, bias=False)
         self.up3 = nn.ConvTranspose2d(bc * 4, bc * 2, 4, stride=2, padding=1, bias=False)
         self.up2 = nn.ConvTranspose2d(bc * 2, bc,     4, stride=2, padding=1, bias=False)
         self.dec4 = self._block(bc * 8, bc * 4)
         self.dec3 = self._block(bc * 4, bc * 2)
         self.dec2 = self._block(bc * 2, bc)
-
-        if use_attention_gate:
-            self.ag3 = RainAttentionGate(F_g=bc * 4, F_l=bc * 4, F_int=bc * 2)
-            self.ag2 = RainAttentionGate(F_g=bc * 2, F_l=bc * 2, F_int=bc)
-            self.ag1 = RainAttentionGate(F_g=bc,     F_l=bc,     F_int=bc // 2)
 
     @staticmethod
     def _block(in_ch, out_ch):
@@ -230,18 +198,12 @@ class UNetDecoder(nn.Module):
     def forward(self, bottleneck, enc_feats):
         e1, e2, e3 = enc_feats
         g4 = self.up4(bottleneck)
-        if self.use_attention_gate:
-            e3 = self.ag3(g4, e3)
         x = self.dec4(torch.cat([g4, e3], dim=1))
 
         g3 = self.up3(x)
-        if self.use_attention_gate:
-            e2 = self.ag2(g3, e2)
         x = self.dec3(torch.cat([g3, e2], dim=1))
 
         g2 = self.up2(x)
-        if self.use_attention_gate:
-            e1 = self.ag1(g2, e1)
         x = self.dec2(torch.cat([g2, e1], dim=1))
         return x
 
@@ -284,11 +246,10 @@ class FeatureDisentanglement(nn.Module):
 class GeneralDecompositionNet(nn.Module):
 
 
-    def __init__(self, in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv", use_orient_block: bool = False, use_attention_gate: bool = False):
+    def __init__(self, in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv", use_orient_block: bool = False):
         super().__init__()
         bc = base_channels
         self.use_orient_block = use_orient_block
-        self.use_attention_gate = use_attention_gate
 
         self.encoder = UNetEncoder(in_channels, bc, use_orient_block=use_orient_block)
         if bottleneck_type == "conv":
@@ -297,7 +258,7 @@ class GeneralDecompositionNet(nn.Module):
             self.bottleneck = TransformerBottleneck(bc * 8, num_heads=8, num_layers=4)
         else:
             raise ValueError(f"Unknown bottleneck_type: {bottleneck_type}")
-        self.decoder = UNetDecoder(bc, use_attention_gate=use_attention_gate)
+        self.decoder = UNetDecoder(bc)
 
         self.disentangle = FeatureDisentanglement(bc, use_orient_block=use_orient_block)
 
@@ -621,8 +582,8 @@ class DecompositionLoss(nn.Module):
         return total, losses
 
 
-def create_model(in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv", use_orient_block: bool = False, use_attention_gate: bool = False) -> GeneralDecompositionNet:
-    return GeneralDecompositionNet(in_channels=in_channels, base_channels=base_channels, bottleneck_type=bottleneck_type, use_orient_block=use_orient_block, use_attention_gate=use_attention_gate)
+def create_model(in_channels: int = 3, base_channels: int = 64, bottleneck_type: str = "conv", use_orient_block: bool = False) -> GeneralDecompositionNet:
+    return GeneralDecompositionNet(in_channels=in_channels, base_channels=base_channels, bottleneck_type=bottleneck_type, use_orient_block=use_orient_block)
 
 
 def count_parameters(model: nn.Module) -> dict:

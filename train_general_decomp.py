@@ -31,7 +31,6 @@ class GeneralDecompositionTrainer:
             base_channels=config.get('base_channels', 64),
             bottleneck_type=config.get('bottleneck_type', 'conv'),
             use_orient_block=config.get('use_orient_block', False),
-            use_attention_gate=config.get('use_attention_gate', False),
         ).to(self.device)
 
         self.criterion = DecompositionLoss(
@@ -424,8 +423,6 @@ def parse_args():
                         help='Bottleneck type: conv (fast) or transformer (accurate)')
     parser.add_argument('--use_orient_block', action='store_true',
                         help='Use OrientationAwareBlock in encoder and pattern branch')
-    parser.add_argument('--use_attention_gate', action='store_true',
-                        help='Use RainAttentionGate in decoder skip connections')
     parser.add_argument('--image_height',  type=int, default=512)
     parser.add_argument('--image_width',   type=int, default=512)
 

@@ -36,7 +36,6 @@ class GeneralDecompositionInference:
             base_channels=self.config.get('base_channels', 64),
             bottleneck_type=self.bottleneck_type,
             use_orient_block=self.config.get('use_orient_block', False),
-            use_attention_gate=self.config.get('use_attention_gate', False),
         )
         self.model.load_state_dict(ckpt['model_state_dict'])
         self.model.to(self.device).eval()
@@ -45,8 +44,7 @@ class GeneralDecompositionInference:
         print(f'Config: in_channels={self.config.get("in_channels",3)}, '
               f'base_channels={self.config.get("base_channels",64)}, '
               f'bottleneck_type={self.bottleneck_type}, '
-              f'use_orient_block={self.config.get("use_orient_block", False)}, '
-              f'use_attention_gate={self.config.get("use_attention_gate", False)}')
+              f'use_orient_block={self.config.get("use_orient_block", False)}')
 
     # ------------------------------------------------------------------
     # Dataset-level inference
