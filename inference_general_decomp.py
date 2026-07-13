@@ -35,6 +35,7 @@ class GeneralDecompositionInference:
             in_channels=self.config.get('in_channels', 3),
             base_channels=self.config.get('base_channels', 64),
             bottleneck_type=self.bottleneck_type,
+            use_orient_block=self.config.get('use_orient_block', False),
         )
         self.model.load_state_dict(ckpt['model_state_dict'])
         self.model.to(self.device).eval()
@@ -42,7 +43,8 @@ class GeneralDecompositionInference:
         print(f'Model loaded from {checkpoint_path}')
         print(f'Config: in_channels={self.config.get("in_channels",3)}, '
               f'base_channels={self.config.get("base_channels",64)}, '
-              f'bottleneck_type={self.bottleneck_type}')
+              f'bottleneck_type={self.bottleneck_type}, '
+              f'use_orient_block={self.config.get("use_orient_block", False)}')
 
     # ------------------------------------------------------------------
     # Dataset-level inference
@@ -79,25 +81,26 @@ class GeneralDecompositionInference:
                 filenames = batch.get('filename', [None] * B)
 
                 for j in range(B):
-                    grid = vutils.make_grid(
-                        torch.cat([
-                            inp[j:j+1],
-                            pattern[j:j+1],
-                            background[j:j+1],
-                            reconstructed[j:j+1],
-                        ]),
-                        nrow=4, normalize=True, padding=2,
-                    )
                     idx = i * B + j
                     deg_type = deg_types[j] if isinstance(deg_types, list) else deg_types
                     fname = filenames[j] if isinstance(filenames, list) else filenames
-                    # Build filename: inference_{idx:04d}_{deg_type}_{stem}.png
-                    deg_suffix = f'_{deg_type}' if deg_type else ''
-                    stem_suffix = f'_{fname}' if fname else ''
-                    out_path = os.path.join(save_dir, f'inference_{deg_suffix}{stem_suffix}.png')
-                    vutils.save_image(grid, out_path)
-                    print(f'Saved: {out_path}')
-                    self._display(grid, f'{deg_suffix}')
+
+                    # Get the original filename stem
+                    if fname:
+                        stem = os.path.splitext(fname)[0]
+                    else:
+                        stem = f'{idx:06d}'
+
+                    # Save input degraded image
+                    input_path = os.path.join(save_dir, f'{stem}_degraded.png')
+                    vutils.save_image(inp[j:j+1], input_path)
+
+                    # Save derained background image
+                    derained_path = os.path.join(save_dir, f'{stem}_derained.png')
+                    vutils.save_image(background[j:j+1], derained_path)
+
+                    print(f'Saved: {input_path}')
+                    print(f'Saved: {derained_path}')
 
     # ------------------------------------------------------------------
     # Single-image inference
@@ -117,9 +120,10 @@ class GeneralDecompositionInference:
             pattern, background, _ = self.model(inp)
             reconstructed = (pattern + background).clamp(0, 1)
 
+        # Create grid with only input and cleaned background (2 columns)
         grid = vutils.make_grid(
-            torch.cat([inp, pattern, background, reconstructed]),
-            nrow=4, normalize=True, padding=2,
+            torch.cat([inp, background]),
+            nrow=2, normalize=True, padding=2,
         )
 
         if save_path:
@@ -146,7 +150,7 @@ class GeneralDecompositionInference:
         plt.figure(figsize=(16, 4))
         plt.imshow(grid_np)
         plt.axis('off')
-        plt.title(f'{title}  |  Input  |  Pattern  |  Background  |  Reconstructed')
+        plt.title(f'{title}  |  Input Degraded  |  Derained Background')
         plt.tight_layout()
         plt.show()
 
