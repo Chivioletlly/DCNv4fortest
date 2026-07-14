@@ -3,6 +3,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+
+ARCHITECTURE_VERSION = 2
+DIRECTION_BLOCK_TYPE = "dcnv4"
+
+try:
+    from DCNv4.modules.dcnv4 import DCNv4 as _DCNv4
+except (ImportError, OSError) as exc:
+    _DCNV4_IMPORT_ERROR = exc
+    _DCNv4 = None
+else:
+    _DCNV4_IMPORT_ERROR = None
+
+
+def validate_checkpoint_architecture(config):
+    """Reject checkpoints produced by the removed directional-convolution block."""
+    if not config.get("use_orient_block", False):
+        return
+
+    architecture_version = config.get("architecture_version")
+    direction_block_type = config.get("direction_block_type")
+    if (
+        architecture_version != ARCHITECTURE_VERSION
+        or direction_block_type != DIRECTION_BLOCK_TYPE
+    ):
+        raise RuntimeError(
+            "This checkpoint uses the legacy OrientationAwareBlock and cannot be loaded "
+            "by the DCNv4 architecture. Train a new checkpoint with "
+            "architecture_version=2 and direction_block_type='dcnv4'."
+        )
+
 class TransformerBlock(nn.Module):
     def __init__(self, dim, num_heads=8, mlp_ratio=4.0, dropout=0.1):
         super().__init__()
@@ -59,54 +89,68 @@ class TransformerBottleneck(nn.Module):
         return self.out_proj(x)
 
 
-class OrientationAwareBlock(nn.Module):
-    def __init__(self, channels, num_orientations=4):
-        super().__init__()
-        self.num_orientations = num_orientations
-        per_orient = channels // num_orientations
-        self.per_orient = per_orient
+class DCNv4FeatureBlock(nn.Module):
+    """Residual DCNv4 feature block operating on NCHW feature maps."""
 
-        self.directional_convs = nn.ModuleList([
-            self._make_orient_conv(per_orient, angle)
-            for angle in range(num_orientations)
-        ])
-        self.fusion = nn.Sequential(
-            nn.Conv2d(per_orient * num_orientations, channels, 1, bias=False),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
+    def __init__(self, channels):
+        super().__init__()
+        if _DCNv4 is None:
+            raise RuntimeError(
+                "DCNv4 is required when --use_orient_block is enabled. On the Linux "
+                "training server, run: bash scripts/build_dcnv4.sh"
+            ) from _DCNV4_IMPORT_ERROR
+
+        self.channels = channels
+        self.group = self._select_group(channels)
+        self.dcn = _DCNv4(
+            channels=channels,
+            kernel_size=3,
+            stride=1,
+            pad=1,
+            dilation=1,
+            group=self.group,
+            offset_scale=1.0,
+            dw_kernel_size=3,
+            center_feature_scale=False,
+            remove_center=False,
+            output_bias=True,
+            without_pointwise=False,
         )
-        self.channel_adjust = None
+        self._initialize_aggregation_bias()
+        self.norm = nn.BatchNorm2d(channels)
+        self.activation = nn.ReLU(inplace=True)
+
+    def _initialize_aggregation_bias(self):
+        """Start from regular 3x3 averaging while keeping learned offsets at zero."""
+        kernel_points = 9
+        values_per_group = kernel_points * 3
+        with torch.no_grad():
+            bias = self.dcn.offset_mask.bias
+            bias.zero_()
+            for group_index in range(self.group):
+                mask_start = group_index * values_per_group + kernel_points * 2
+                bias[mask_start:mask_start + kernel_points].fill_(1.0 / kernel_points)
 
     @staticmethod
-    def _make_orient_conv(channels, angle_idx):
-        kernel_sizes = [(1, 7), (1, 11), (1, 15), (1, 21)]
-        k = kernel_sizes[angle_idx % len(kernel_sizes)]
-        return nn.Sequential(
-            nn.Conv2d(channels, channels, k, padding=(k[0]//2, k[1]//2), bias=False),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
+    def _select_group(channels):
+        for group_channels in (32, 16):
+            if channels % group_channels == 0:
+                return channels // group_channels
+        raise ValueError(
+            f"DCNv4 feature channels must be divisible by 32 or 16, got {channels}."
         )
 
     def forward(self, x):
-        C = x.shape[1]
-        if C < self.num_orientations:
-            return x
-        usable = self.per_orient * self.num_orientations
-        if C != usable:
-            if self.channel_adjust is None or self.channel_adjust.in_channels != C:
-                self.channel_adjust = nn.Conv2d(C, usable, 1, bias=False).to(x.device)
-            x_in = self.channel_adjust(x)
-        else:
-            x_in = x
+        if x.ndim != 4 or x.shape[1] != self.channels:
+            raise ValueError(
+                f"Expected NCHW input with {self.channels} channels, got {tuple(x.shape)}."
+            )
 
-        parts = x_in.split(self.per_orient, dim=1)
-        out_parts = [conv(part) for conv, part in zip(self.directional_convs, parts)]
-        out = torch.cat(out_parts, dim=1)
-        out = self.fusion(out)
-
-        if out.shape[1] != C:
-            return out
-        return out + x
+        batch, channels, height, width = x.shape
+        sequence = x.permute(0, 2, 3, 1).reshape(batch, height * width, channels).contiguous()
+        out = self.dcn(sequence, shape=(height, width))
+        out = out.reshape(batch, height, width, channels).permute(0, 3, 1, 2).contiguous()
+        return x + self.activation(self.norm(out))
 
 
 class ConvBottleneck(nn.Module):
@@ -147,9 +191,9 @@ class UNetEncoder(nn.Module):
         self.pool = nn.MaxPool2d(2)
 
         if use_orient_block:
-            self.orient2 = OrientationAwareBlock(bc * 2,  num_orientations=4)
-            self.orient3 = OrientationAwareBlock(bc * 4,  num_orientations=4)
-            self.orient4 = OrientationAwareBlock(bc * 8,  num_orientations=4)
+            self.orient2 = DCNv4FeatureBlock(bc * 2)
+            self.orient3 = DCNv4FeatureBlock(bc * 4)
+            self.orient4 = DCNv4FeatureBlock(bc * 8)
 
     @staticmethod
     def _block(in_ch, out_ch, dilation):
@@ -222,7 +266,7 @@ class FeatureDisentanglement(nn.Module):
         )
         self.use_orient_block = use_orient_block
         if use_orient_block:
-            self.orient_pattern = OrientationAwareBlock(half, num_orientations=4)
+            self.orient_pattern = DCNv4FeatureBlock(half)
 
     @staticmethod
     def orthogonal_loss(a, b):
@@ -349,20 +393,28 @@ class SSIM(nn.Module):
         self.val_range = val_range
         self.window = None
 
-    def forward(self, x, y):
+    def forward(self, x, y, reduction="mean"):
         if self.window is None or self.window.device != x.device:
             self.window = create_window(self.window_size, x.size(1)).to(x.device)
-        return ssim(x, y, window=self.window, val_range=self.val_range)
+        if reduction not in {"mean", "none"}:
+            raise ValueError(f"Unsupported reduction: {reduction}")
+        return ssim(
+            x,
+            y,
+            window=self.window,
+            size_average=reduction == "mean",
+            val_range=self.val_range,
+        )
 
 class SSIMLoss(nn.Module):
     def __init__(self):
         super().__init__()
         self.ssim = SSIM()
 
-    def forward(self, pred, target):
-        return 1.0 - self.ssim(pred, target)
+    def forward(self, pred, target, reduction="mean"):
+        return 1.0 - self.ssim(pred, target, reduction=reduction)
 
-def frequency_high_freq_loss(pred, target, high_freq_ratio=0.3):
+def frequency_high_freq_loss(pred, target, high_freq_ratio=0.3, reduction="mean"):
     """
     频域高频损失函数 - 增强高频细节恢复
     
@@ -427,11 +479,14 @@ def frequency_high_freq_loss(pred, target, high_freq_ratio=0.3):
     target_magnitude = torch.abs(target_high_freq)
     
     # 使用L1损失计算高频差异
-    freq_loss = F.l1_loss(pred_magnitude, target_magnitude)
-    
-    return freq_loss
+    difference = torch.abs(pred_magnitude - target_magnitude)
+    if reduction == "none":
+        return difference.flatten(1).mean(dim=1)
+    if reduction == "mean":
+        return difference.mean()
+    raise ValueError(f"Unsupported reduction: {reduction}")
 
-def gradient_edge_loss(pred, target):
+def gradient_edge_loss(pred, target, reduction="mean"):
     """
     梯度边缘损失函数 - 保留图像边缘细节
     
@@ -457,9 +512,12 @@ def gradient_edge_loss(pred, target):
     target_grad = compute_sobel_gradients(target)
     
     # 使用L1损失保持边缘
-    edge_loss = F.l1_loss(pred_grad, target_grad)
-    
-    return edge_loss
+    difference = torch.abs(pred_grad - target_grad)
+    if reduction == "none":
+        return difference.flatten(1).mean(dim=1)
+    if reduction == "mean":
+        return difference.mean()
+    raise ValueError(f"Unsupported reduction: {reduction}")
 
 class DecompositionLoss(nn.Module):
     """
@@ -503,14 +561,23 @@ class DecompositionLoss(nn.Module):
         input_image,
         pattern_gt=None,
         bg_gt=None,
+        return_per_sample=False,
     ):
        
         losses = {}
-        total  = 0.0
+        per_sample = {}
+        image_total = pattern.new_zeros(pattern.shape[0])
 
         # 1. Orthogonal loss
         losses['orthogonal'] = orth_loss
-        total = total + self.w_orthogonal * orth_loss
+        total = self.w_orthogonal * orth_loss
+
+        def add_image_loss(name, values, weight):
+            nonlocal image_total, total
+            per_sample[name] = values
+            losses[name] = values.mean()
+            image_total = image_total + weight * values
+            total = total + weight * losses[name]
 
         # # 2. Pattern L2
         # if pattern_gt is not None:
@@ -519,14 +586,28 @@ class DecompositionLoss(nn.Module):
 
         # 2. Pattern L1 + SSIM
         if pattern_gt is not None:
-            losses['pattern_l1'] = F.l1_loss(pattern, pattern_gt)
-            total = total + self.w_pattern * losses['pattern_l1']
-            losses['pattern_ssim'] = self.ssim_loss(pattern, pattern_gt)
-            total +=self.w_pattern * self.w_ssim * losses['pattern_ssim']
-            losses['pattern_freq'] = frequency_high_freq_loss(pattern, pattern_gt,high_freq_ratio=0.3)
-            total += self.w_pattern * self.w_frequency * losses['pattern_freq']
-            losses['pattern_edge'] = gradient_edge_loss(pattern, pattern_gt)
-            total += self.w_pattern * self.w_edge * losses['pattern_edge'] 
+            add_image_loss(
+                'pattern_l1',
+                torch.abs(pattern - pattern_gt).flatten(1).mean(dim=1),
+                self.w_pattern,
+            )
+            add_image_loss(
+                'pattern_ssim',
+                self.ssim_loss(pattern, pattern_gt, reduction='none'),
+                self.w_pattern * self.w_ssim,
+            )
+            add_image_loss(
+                'pattern_freq',
+                frequency_high_freq_loss(
+                    pattern, pattern_gt, high_freq_ratio=0.3, reduction='none'
+                ),
+                self.w_pattern * self.w_frequency,
+            )
+            add_image_loss(
+                'pattern_edge',
+                gradient_edge_loss(pattern, pattern_gt, reduction='none'),
+                self.w_pattern * self.w_edge,
+            )
 
             
    
@@ -538,15 +619,29 @@ class DecompositionLoss(nn.Module):
         #     losses['bg_l2'] = F.mse_loss(background, bg_gt)
         #     total = total + self.w_bg * losses['bg_l2']
         # 3. Background L1 + SSIM
-        if bg_gt is not None:   
-            losses['bg_l1'] = F.l1_loss(background, bg_gt)
-            total = total + self.w_bg * losses['bg_l1']
-            losses['bg_ssim'] = self.ssim_loss(background, bg_gt)
-            total += self.w_bg * self.w_ssim * losses['bg_ssim']
-            losses['bg_freq'] = frequency_high_freq_loss(background, bg_gt,high_freq_ratio=0.3)
-            total += self.w_bg * self.w_frequency * losses['bg_freq']
-            losses['bg_edge'] = gradient_edge_loss(background, bg_gt)
-            total += self.w_bg * self.w_edge * losses['bg_edge']
+        if bg_gt is not None:
+            add_image_loss(
+                'bg_l1',
+                torch.abs(background - bg_gt).flatten(1).mean(dim=1),
+                self.w_bg,
+            )
+            add_image_loss(
+                'bg_ssim',
+                self.ssim_loss(background, bg_gt, reduction='none'),
+                self.w_bg * self.w_ssim,
+            )
+            add_image_loss(
+                'bg_freq',
+                frequency_high_freq_loss(
+                    background, bg_gt, high_freq_ratio=0.3, reduction='none'
+                ),
+                self.w_bg * self.w_frequency,
+            )
+            add_image_loss(
+                'bg_edge',
+                gradient_edge_loss(background, bg_gt, reduction='none'),
+                self.w_bg * self.w_edge,
+            )
 
         # # 4. Additive reconstruction L2:  pattern + background ≈ input
         # reconstruction = (pattern + background).clamp(0, 1)
@@ -555,16 +650,33 @@ class DecompositionLoss(nn.Module):
 
         # 4. Additive reconstruction L1 + SSIM
         reconstruction = (pattern + background).clamp(0, 1)
-        losses['recon_l1'] = F.l1_loss(reconstruction, input_image)
-        total = total + self.w_recon * losses['recon_l1']
-        losses['recon_ssim'] = self.ssim_loss(reconstruction, input_image)
-        total += self.w_recon * self.w_ssim * losses['recon_ssim']
-        losses['recon_freq'] = frequency_high_freq_loss(reconstruction, input_image)
-        total += self.w_recon * self.w_frequency * losses['recon_freq']
-        losses['recon_edge'] = gradient_edge_loss(reconstruction, input_image)
-        total += self.w_recon * self.w_edge * losses['recon_edge']
+        add_image_loss(
+            'recon_l1',
+            torch.abs(reconstruction - input_image).flatten(1).mean(dim=1),
+            self.w_recon,
+        )
+        add_image_loss(
+            'recon_ssim',
+            self.ssim_loss(reconstruction, input_image, reduction='none'),
+            self.w_recon * self.w_ssim,
+        )
+        add_image_loss(
+            'recon_freq',
+            frequency_high_freq_loss(
+                reconstruction, input_image, reduction='none'
+            ),
+            self.w_recon * self.w_frequency,
+        )
+        add_image_loss(
+            'recon_edge',
+            gradient_edge_loss(reconstruction, input_image, reduction='none'),
+            self.w_recon * self.w_edge,
+        )
 
+        per_sample['image_total'] = image_total
         losses['total'] = total
+        if return_per_sample:
+            return total, losses, per_sample
         return total, losses
 
 

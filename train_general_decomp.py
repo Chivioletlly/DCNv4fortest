@@ -13,7 +13,12 @@ from tqdm import tqdm
 from typing import Dict
 
 from general_decomp.general_decomposition_model import (
-    GeneralDecompositionNet, DecompositionLoss, count_parameters
+    ARCHITECTURE_VERSION,
+    DIRECTION_BLOCK_TYPE,
+    GeneralDecompositionNet,
+    DecompositionLoss,
+    count_parameters,
+    validate_checkpoint_architecture,
 )
 from general_decomp.dataset import build_dataloader
 
@@ -21,10 +26,15 @@ from general_decomp.dataset import build_dataloader
 class GeneralDecompositionTrainer:
 
     def __init__(self, config: Dict):
-        self.config = config  
+        self.config = dict(config)
+        self.config['architecture_version'] = ARCHITECTURE_VERSION
+        self.config['direction_block_type'] = DIRECTION_BLOCK_TYPE
+        config = self.config
         self.device = torch.device(
             config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
         )
+        if config.get('use_orient_block', False) and self.device.type != 'cuda':
+            raise RuntimeError('DCNv4 training requires a Linux CUDA GPU')
 
         self.model = GeneralDecompositionNet(
             in_channels=config.get('in_channels', 3),
@@ -61,6 +71,8 @@ class GeneralDecompositionTrainer:
         self.save_interval = config.get('save_interval', 20)
         self.log_interval  = config.get('log_interval', 10)
         self.val_interval  = config.get('val_interval', 5)
+        self.best_val_loss = float('inf')
+        self.global_step = 0
 
         self.checkpoint_dir  = config.get('checkpoint_dir', './checkpoints/general_decomp')
         self.tensorboard_dir = config.get('tensorboard_dir') or os.path.join(self.checkpoint_dir, 'tensorboard')
@@ -134,56 +146,136 @@ class GeneralDecompositionTrainer:
         # lol_gt → clean background,  flare_gt → degradation pattern
         bg_gt      = batch['lol_gt'].to(device)   if 'lol_gt'   in batch else None
         pattern_gt = batch['flare_gt'].to(device)  if 'flare_gt' in batch else None
-        deg_type   = batch['degradation_type'] if 'degradation_type' in batch else 'unknown'
-        return inp, bg_gt, pattern_gt, deg_type
+        raw_types = batch.get('degradation_type', 'unknown')
+        degradation_types = GeneralDecompositionTrainer._normalize_degradation_types(
+            raw_types, inp.shape[0]
+        )
+        return inp, bg_gt, pattern_gt, degradation_types
+
+    @staticmethod
+    def _normalize_degradation_types(raw_types, batch_size):
+        """Return exactly one degradation label per sample in the batch."""
+        if isinstance(raw_types, str):
+            labels = [raw_types] * batch_size
+        else:
+            labels = [str(label) for label in raw_types]
+        if len(labels) != batch_size:
+            raise ValueError(
+                'degradation_type count does not match batch size: '
+                f'{len(labels)} != {batch_size}'
+            )
+        return [label.strip() or 'unknown' for label in labels]
+
+    @staticmethod
+    def _tensorboard_label(label):
+        """Make a dataset label safe and stable as one TensorBoard path segment."""
+        cleaned = ''.join(
+            character if character.isalnum() or character in {'-', '_', '.'} else '_'
+            for character in str(label).strip()
+        )
+        return cleaned or 'unknown'
+
+    @staticmethod
+    def _add_stat(accumulator, key, value_sum, sample_count):
+        current_sum, current_count = accumulator.get(key, (0.0, 0))
+        accumulator[key] = (
+            current_sum + float(value_sum),
+            current_count + int(sample_count),
+        )
+
+    @classmethod
+    def _accumulate_loss_stats(
+        cls, accumulator, loss_dict, per_sample_losses, degradation_types
+    ):
+        """Accumulate sample-weighted overall and exact per-type image losses."""
+        batch_size = len(degradation_types)
+        for name, value in loss_dict.items():
+            if isinstance(value, torch.Tensor):
+                cls._add_stat(
+                    accumulator,
+                    f'overall/{name}',
+                    value.detach().item() * batch_size,
+                    batch_size,
+                )
+
+        grouped_indices = {}
+        for index, label in enumerate(degradation_types):
+            safe_label = cls._tensorboard_label(label)
+            grouped_indices.setdefault(safe_label, []).append(index)
+
+        for label, indices in grouped_indices.items():
+            for name, values in per_sample_losses.items():
+                cls._add_stat(
+                    accumulator,
+                    f'by_type/{label}/{name}',
+                    values[indices].sum().item(),
+                    len(indices),
+                )
+
+    @staticmethod
+    def _average_stats(accumulator):
+        return {
+            key: value_sum / sample_count
+            for key, (value_sum, sample_count) in accumulator.items()
+            if sample_count > 0
+        }
+
+    @staticmethod
+    def _losses_to_cpu(per_sample_losses):
+        """Copy all per-sample metrics with one small device synchronization."""
+        loss_names = tuple(per_sample_losses)
+        loss_matrix = torch.stack(
+            [per_sample_losses[name] for name in loss_names], dim=1
+        ).detach().cpu()
+        return {
+            name: loss_matrix[:, index] for index, name in enumerate(loss_names)
+        }
 
     # ------------------------------------------------------------------
     # Train / validate
     # ------------------------------------------------------------------
 
-    def _forward_and_loss(self, inp, bg_gt, pattern_gt,deg_type):
+    def _forward_and_loss(self, inp, bg_gt, pattern_gt):
         pattern, background, orth_loss = self.model(inp)
-        total_loss, loss_dict = self.criterion(
-            pattern, background, orth_loss, inp, pattern_gt, bg_gt
+        total_loss, loss_dict, per_sample_losses = self.criterion(
+            pattern,
+            background,
+            orth_loss,
+            inp,
+            pattern_gt,
+            bg_gt,
+            return_per_sample=True,
         )
-
-
-        # if deg_type == 'rain' and 'bg_l2' in loss_dict:
-        #     rain_multiplier = 10.0
-        #     total_loss = total_loss + (rain_multiplier - self.config.get('w_bg', 1.0))* loss_dict['bg_l2']
-        #     loss_dict['bg_l2'] = loss_dict['bg_l2'] * rain_multiplier
-
-
-
-        return pattern, background, total_loss, loss_dict
+        per_sample_losses = {
+            name: values.detach() for name, values in per_sample_losses.items()
+        }
+        return pattern, background, total_loss, loss_dict, per_sample_losses
 
     def train_epoch(self, epoch: int) -> Dict:
         self.model.train()
-        epoch_losses: Dict = {}
+        epoch_stats: Dict = {}
         num_batches = len(self.train_loader)
 
         with tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.epochs}') as pbar:
             for batch_idx, batch in enumerate(pbar):
-                inp, bg_gt, pattern_gt, deg_type = self._unpack_batch(batch, self.device)
+                inp, bg_gt, pattern_gt, degradation_types = self._unpack_batch(
+                    batch, self.device
+                )
 
                 self.optimizer.zero_grad()
-                pattern, background, total_loss, loss_dict = self._forward_and_loss(
-                    inp, bg_gt, pattern_gt , deg_type
+                pattern, background, total_loss, loss_dict, per_sample_losses = (
+                    self._forward_and_loss(inp, bg_gt, pattern_gt)
                 )
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.config.get('grad_clip', 1.0)
                 )
                 self.optimizer.step()
+                per_sample_losses = self._losses_to_cpu(per_sample_losses)
 
-                for k, v in loss_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        epoch_losses.setdefault(k, []).append(v.item())
-
-                # 按退化类型聚合损失
-                for k, v in loss_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        epoch_losses.setdefault(f'{deg_type}/{k}', []).append(v.item())
+                self._accumulate_loss_stats(
+                    epoch_stats, loss_dict, per_sample_losses, degradation_types
+                )
 
                 pbar.set_postfix({
                     'loss':  f'{total_loss.item():.4f}',
@@ -193,36 +285,46 @@ class GeneralDecompositionTrainer:
                 })
 
                 if batch_idx % self.log_interval == 0:
-                    self._log_batch(epoch, batch_idx, loss_dict, num_batches, deg_type)
+                    self._log_batch(
+                        epoch,
+                        batch_idx,
+                        loss_dict,
+                        per_sample_losses,
+                        num_batches,
+                        degradation_types,
+                    )
+                self.global_step += 1
 
-        return {k: sum(v) / len(v) for k, v in epoch_losses.items()}
+        return self._average_stats(epoch_stats)
 
     def validate(self, epoch: int) -> Dict:
         if self.val_loader is None:
             return {}
 
         self.model.eval()
-        val_losses: Dict = {}
-        recon_errors = []
+        val_stats: Dict = {}
 
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc='Validating'):
-                inp, bg_gt, pattern_gt, deg_type = self._unpack_batch(batch, self.device)
-                pattern, background, total_loss, loss_dict = self._forward_and_loss(
-                    inp, bg_gt, pattern_gt,deg_type
+                inp, bg_gt, pattern_gt, degradation_types = self._unpack_batch(
+                    batch, self.device
                 )
-                for k, v in loss_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        val_losses.setdefault(k, []).append(v.item())
-                        # 按退化类型聚合
-                        val_losses.setdefault(f'{deg_type}/{k}', []).append(v.item())
+                pattern, background, _, loss_dict, per_sample_losses = (
+                    self._forward_and_loss(inp, bg_gt, pattern_gt)
+                )
+                per_sample_losses = self._losses_to_cpu(per_sample_losses)
 
                 recon = (pattern + background).clamp(0, 1)
-                recon_errors.append(torch.mean((recon - inp) ** 2).item())
+                recon_mse = (recon - inp).square().flatten(1).mean(dim=1)
+                loss_dict = dict(loss_dict)
+                loss_dict['recon_mse'] = recon_mse.mean()
+                per_sample_losses = dict(per_sample_losses)
+                per_sample_losses['recon_mse'] = recon_mse.cpu()
+                self._accumulate_loss_stats(
+                    val_stats, loss_dict, per_sample_losses, degradation_types
+                )
 
-        avg = {k: sum(v) / len(v) for k, v in val_losses.items()}
-        avg['avg_recon_mse'] = sum(recon_errors) / len(recon_errors)
-        return avg
+        return self._average_stats(val_stats)
 
 
     def save_checkpoint(self, epoch: int, is_best: bool = False):
@@ -231,6 +333,8 @@ class GeneralDecompositionTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_val_loss': self.best_val_loss,
+            'global_step': self.global_step,
             'config': self.config,
         }
         torch.save(ckpt, os.path.join(self.checkpoint_dir, 'latest.pth'))
@@ -248,37 +352,76 @@ class GeneralDecompositionTrainer:
             self.logger.warning('Checkpoint not found: %s', path)
             return 0
         ckpt = torch.load(path, map_location=self.device)
+        validate_checkpoint_architecture(ckpt.get('config', {}))
         self.model.load_state_dict(ckpt['model_state_dict'])
         self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        self.best_val_loss = ckpt.get('best_val_loss', float('inf'))
         epoch = ckpt.get('epoch', 0)
-        self.logger.info('Resumed from epoch %d (%s)', epoch, path)
-        return epoch
+        self.global_step = ckpt.get(
+            'global_step', (epoch + 1) * len(self.train_loader)
+        )
+        self.logger.info('Resumed after epoch %d (%s)', epoch + 1, path)
+        return epoch + 1
 
 
 
-    def _log_batch(self, epoch, batch_idx, loss_dict, num_batches, deg_type='unknown'):
-        step = epoch * num_batches + batch_idx
+    def _log_batch(
+        self,
+        epoch,
+        batch_idx,
+        loss_dict,
+        per_sample_losses,
+        num_batches,
+        degradation_types,
+    ):
+        step = self.global_step
         # 总体损失（不区分退化类型）
         for k, v in loss_dict.items():
             if isinstance(v, torch.Tensor):
-                self.writer.add_scalar(f'train/batch_{k}', v.item(), step)
-        self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], step)
+                self.writer.add_scalar(f'train_batch/overall/{k}', v.item(), step)
+        self.writer.add_scalar(
+            'train_batch/lr', self.optimizer.param_groups[0]['lr'], step
+        )
 
         # 按退化类型记录
-        for k, v in loss_dict.items():
-            if isinstance(v, torch.Tensor):
-                self.writer.add_scalar(f'train/{deg_type}/batch_{k}', v.item(), step)
+        grouped_indices = {}
+        for index, label in enumerate(degradation_types):
+            safe_label = self._tensorboard_label(label)
+            grouped_indices.setdefault(safe_label, []).append(index)
+        for label, indices in grouped_indices.items():
+            for name, values in per_sample_losses.items():
+                self.writer.add_scalar(
+                    f'train_batch/by_type/{label}/{name}',
+                    values[indices].mean().item(),
+                    step,
+                )
 
         loss_str = ' | '.join(
             f'{k}: {v.item():.4f}' for k, v in loss_dict.items() if isinstance(v, torch.Tensor)
         )
-        self.logger.info('Epoch %3d | Batch %4d/%4d | [%s] %s', epoch + 1, batch_idx, num_batches, deg_type, loss_str)
+        labels = ','.join(sorted(set(degradation_types)))
+        self.logger.info(
+            'Epoch %3d | Batch %4d/%4d | types=%s | %s',
+            epoch + 1,
+            batch_idx + 1,
+            num_batches,
+            labels,
+            loss_str,
+        )
 
     def _log_epoch(self, epoch, train_losses, val_losses):
         # 总体损失（不区分退化类型）
-        overall_train = {k: v for k, v in train_losses.items() if '/' not in k}
-        overall_val = {k: v for k, v in val_losses.items() if '/' not in k}
+        overall_train = {
+            key[len('overall/'):]: value
+            for key, value in train_losses.items()
+            if key.startswith('overall/')
+        }
+        overall_val = {
+            key[len('overall/'):]: value
+            for key, value in val_losses.items()
+            if key.startswith('overall/')
+        }
 
         self.logger.info('Epoch %3d Train | %s', epoch + 1,
                          ' | '.join(f'{k}: {v:.4f}' for k, v in overall_train.items()))
@@ -287,18 +430,17 @@ class GeneralDecompositionTrainer:
                              ' | '.join(f'{k}: {v:.4f}' for k, v in overall_val.items()))
 
         # 记录总体损失
-        for k, v in overall_train.items():
-            self.writer.add_scalar(f'train_epoch/{k}', v, epoch + 1)
-        for k, v in overall_val.items():
-            self.writer.add_scalar(f'val_epoch/{k}', v, epoch + 1)
+        for key, value in train_losses.items():
+            self.writer.add_scalar(f'train_epoch/{key}', value, epoch + 1)
+        for key, value in val_losses.items():
+            self.writer.add_scalar(f'val_epoch/{key}', value, epoch + 1)
 
         # 按退化类型记录
-        for k, v in train_losses.items():
-            if '/' in k:
-                self.writer.add_scalar(f'train_epoch/{k}', v, epoch + 1)
-        for k, v in val_losses.items():
-            if '/' in k:
-                self.writer.add_scalar(f'val_epoch/{k}', v, epoch + 1)
+        self.writer.add_scalar(
+            'train_epoch/learning_rate',
+            self.optimizer.param_groups[0]['lr'],
+            epoch + 1,
+        )
 
         self.writer.flush()
 
@@ -310,33 +452,61 @@ class GeneralDecompositionTrainer:
         save_dir = os.path.join(self.checkpoint_dir, 'samples')
         os.makedirs(save_dir, exist_ok=True)
 
+        saved_samples = 0
         with torch.no_grad():
-            for i, batch in enumerate(self.val_loader):
-                if i >= num_samples:
+            for batch in self.val_loader:
+                if saved_samples >= num_samples:
                     break
-                inp, bg_gt, pattern_gt, deg_type = self._unpack_batch(batch, self.device)
-                pattern, background, _, _ = self._forward_and_loss(inp, bg_gt, pattern_gt,deg_type)
+                inp, bg_gt, pattern_gt, degradation_types = self._unpack_batch(
+                    batch, self.device
+                )
+                pattern, background, _ = self.model(inp)
                 reconstructed = (pattern + background).clamp(0, 1)
 
-                # Build visualisation row: input | pattern | bg | reconstructed [| GT bg | GT pattern]
-                imgs = [inp[0:1], pattern[0:1], background[0:1], reconstructed[0:1]]
-                labels = ['Input', 'Pattern', 'Background', 'Reconstructed']
+                for sample_index in range(inp.shape[0]):
+                    if saved_samples >= num_samples:
+                        break
+                    images = [
+                        inp[sample_index:sample_index + 1],
+                        pattern[sample_index:sample_index + 1],
+                        background[sample_index:sample_index + 1],
+                        reconstructed[sample_index:sample_index + 1],
+                    ]
+                    labels = ['input', 'pattern', 'background', 'reconstructed']
 
-                if bg_gt is not None:
-                    imgs.append(bg_gt[0:1]);       labels.append('BG_GT')
-                if pattern_gt is not None:
-                    imgs.append(pattern_gt[0:1]);  labels.append('Pattern_GT')
+                    if bg_gt is not None:
+                        images.append(bg_gt[sample_index:sample_index + 1])
+                        labels.append('background_gt')
+                    if pattern_gt is not None:
+                        images.append(pattern_gt[sample_index:sample_index + 1])
+                        labels.append('pattern_gt')
 
-                grid = vutils.make_grid(torch.cat(imgs, dim=0),
-                                        nrow=len(imgs), normalize=True, padding=2)
-                self.writer.add_image(f'samples/epoch_{epoch}_sample_{i}', grid, epoch)
-                vutils.save_image(grid, os.path.join(save_dir, f'epoch_{epoch:03d}_sample_{i}.png'))
-
-                for img_t, label in zip(imgs, labels):
-                    self.writer.add_image(
-                        f'components/{label}/epoch_{epoch}_sample_{i}',
-                        vutils.make_grid(img_t, normalize=True, padding=2), epoch
+                    tag = f'val_samples/sample_{saved_samples:02d}'
+                    grid = vutils.make_grid(
+                        torch.cat(images, dim=0),
+                        nrow=len(images),
+                        normalize=False,
+                        padding=2,
                     )
+                    self.writer.add_image(f'{tag}/comparison', grid, epoch + 1)
+                    self.writer.add_text(
+                        f'{tag}/degradation_type',
+                        degradation_types[sample_index],
+                        epoch + 1,
+                    )
+                    vutils.save_image(
+                        grid,
+                        os.path.join(
+                            save_dir,
+                            f'epoch_{epoch + 1:03d}_sample_{saved_samples:02d}.png',
+                        ),
+                    )
+
+                    for image, label in zip(images, labels):
+                        self.writer.add_image(
+                            f'{tag}/{label}', image[0].clamp(0, 1), epoch + 1
+                        )
+                    saved_samples += 1
 
         self.logger.info('Samples saved → %s', save_dir)
 
@@ -348,8 +518,6 @@ class GeneralDecompositionTrainer:
         start_epoch = 0
         if self.config.get('resume_from'):
             start_epoch = self.load_checkpoint(self.config['resume_from'])
-
-        best_val_loss = float('inf')
 
         for epoch in range(start_epoch, self.epochs):
             train_losses = self.train_epoch(epoch)
@@ -364,11 +532,11 @@ class GeneralDecompositionTrainer:
             self._log_epoch(epoch, train_losses, val_losses)
 
             is_best = False
-            if val_losses and 'total' in val_losses:
-                if val_losses['total'] < best_val_loss:
-                    best_val_loss = val_losses['total']
+            if 'overall/total' in val_losses:
+                if val_losses['overall/total'] < self.best_val_loss:
+                    self.best_val_loss = val_losses['overall/total']
                     is_best = True
-                    self.logger.info('New best val loss: %.6f', best_val_loss)
+                    self.logger.info('New best val loss: %.6f', self.best_val_loss)
 
             self.save_checkpoint(epoch, is_best)
 
@@ -422,7 +590,7 @@ def parse_args():
                         choices=['conv', 'transformer'],
                         help='Bottleneck type: conv (fast) or transformer (accurate)')
     parser.add_argument('--use_orient_block', action='store_true',
-                        help='Use OrientationAwareBlock in encoder and pattern branch')
+                        help='Use residual DCNv4 blocks in encoder and pattern branch')
     parser.add_argument('--image_height',  type=int, default=512)
     parser.add_argument('--image_width',   type=int, default=512)
 

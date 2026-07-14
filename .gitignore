@@ -1,8 +1,11 @@
 .venv/
+.uv-cache/
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+build/
+*.egg-info/
 .Python
 images5000/
 images1000/

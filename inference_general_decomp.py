@@ -18,7 +18,10 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import argparse
 
-from general_decomp.general_decomposition_model import GeneralDecompositionNet
+from general_decomp.general_decomposition_model import (
+    GeneralDecompositionNet,
+    validate_checkpoint_architecture,
+)
 from general_decomp.dataset import build_dataloader
 
 
@@ -30,6 +33,9 @@ class GeneralDecompositionInference:
 
         ckpt = torch.load(checkpoint_path, map_location=self.device)
         self.config = ckpt.get('config', {})
+        validate_checkpoint_architecture(self.config)
+        if self.config.get('use_orient_block', False) and self.device.type != 'cuda':
+            raise RuntimeError('DCNv4 inference requires a CUDA GPU')
 
         self.model = GeneralDecompositionNet(
             in_channels=self.config.get('in_channels', 3),
@@ -44,7 +50,8 @@ class GeneralDecompositionInference:
         print(f'Config: in_channels={self.config.get("in_channels",3)}, '
               f'base_channels={self.config.get("base_channels",64)}, '
               f'bottleneck_type={self.bottleneck_type}, '
-              f'use_orient_block={self.config.get("use_orient_block", False)}')
+              f'use_orient_block={self.config.get("use_orient_block", False)}, '
+              f'direction_block_type={self.config.get("direction_block_type", "none")}')
 
     # ------------------------------------------------------------------
     # Dataset-level inference

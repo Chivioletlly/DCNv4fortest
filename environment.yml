@@ -6,8 +6,9 @@ channels:
   - defaults
 dependencies:
   - python=3.9
-  - pytorch>=2.0.0
-  - torchvision>=0.15.0
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - pytorch-cuda=12.4
   - pip
   - ipykernel>=6.29.5
   - matplotlib>=3.7.5
@@ -19,3 +20,4 @@ dependencies:
     - pillow>=9.0.0
     - tqdm>=4.65.0
     - tensorboard>=2.14.0
+    - ninja>=1.11.0
