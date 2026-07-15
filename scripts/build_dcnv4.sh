@@ -70,7 +70,7 @@ python - <<'PY'
 import importlib.util
 import sys
 
-missing = [name for name in ("setuptools", "wheel") if importlib.util.find_spec(name) is None]
+missing = [name for name in ("setuptools",) if importlib.util.find_spec(name) is None]
 if missing:
     print(
         "Missing Python build tools: " + ", ".join(missing) +
@@ -87,19 +87,16 @@ for compiler in gcc g++; do
   fi
 done
 
-# A normal (non-editable) install avoids setuptools' deprecated `develop` path.
-# That path starts a nested PEP 517 editable build whose isolated environment does
-# not contain torch. Disabling dependency resolution and build isolation also keeps
-# this local CUDA build independent of the configured pip package index.
+# Build through the upstream setup.py entry point. The editable pip path starts a
+# nested PEP 517 environment without torch, while the wheel path can fail metadata
+# verification for this legacy extension package. Direct setup.py installation uses
+# the active torch environment and does not contact a package index.
 export MAX_JOBS="${MAX_JOBS:-4}"
 echo "Building DCNv4 with MAX_JOBS=${MAX_JOBS}, CUDA_HOME=${CUDA_HOME}."
-PIP_DISABLE_PIP_VERSION_CHECK=1 python -m pip install \
-  --no-build-isolation \
-  --no-deps \
-  --no-cache-dir \
-  --force-reinstall \
-  -v \
-  "${VENDOR_DIR}"
+(
+  cd "${VENDOR_DIR}"
+  python setup.py build install
+)
 
 python -c "from DCNv4.modules.dcnv4 import DCNv4; print('DCNv4 import test passed.')"
 python "${ROOT_DIR}/scripts/test_dcnv4.py" --resolution 64 --steps 1
