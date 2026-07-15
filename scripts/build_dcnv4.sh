@@ -66,7 +66,42 @@ python -c "import ninja" 2>/dev/null || {
   exit 1
 }
 
-python -m pip install --no-build-isolation -v -e "${VENDOR_DIR}"
+python - <<'PY'
+import importlib.util
+import sys
+
+missing = [name for name in ("setuptools", "wheel") if importlib.util.find_spec(name) is None]
+if missing:
+    print(
+        "Missing Python build tools: " + ", ".join(missing) +
+        ". Install them in the active environment before building DCNv4.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+
+for compiler in gcc g++; do
+  if ! command -v "${compiler}" >/dev/null 2>&1; then
+    echo "${compiler} is missing. Install a Linux C/C++ build toolchain before building DCNv4." >&2
+    exit 1
+  fi
+done
+
+# A normal (non-editable) install avoids setuptools' deprecated `develop` path.
+# That path starts a nested PEP 517 editable build whose isolated environment does
+# not contain torch. Disabling dependency resolution and build isolation also keeps
+# this local CUDA build independent of the configured pip package index.
+export MAX_JOBS="${MAX_JOBS:-4}"
+echo "Building DCNv4 with MAX_JOBS=${MAX_JOBS}, CUDA_HOME=${CUDA_HOME}."
+PIP_DISABLE_PIP_VERSION_CHECK=1 python -m pip install \
+  --no-build-isolation \
+  --no-deps \
+  --no-cache-dir \
+  --force-reinstall \
+  -v \
+  "${VENDOR_DIR}"
+
+python -c "from DCNv4.modules.dcnv4 import DCNv4; print('DCNv4 import test passed.')"
 python "${ROOT_DIR}/scripts/test_dcnv4.py" --resolution 64 --steps 1
 
 echo "DCNv4 build and smoke test completed successfully."
