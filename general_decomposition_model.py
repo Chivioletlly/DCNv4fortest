@@ -427,6 +427,15 @@ def frequency_high_freq_loss(pred, target, high_freq_ratio=0.3, reduction="mean"
         高频损失值
     """
     # 确保输入在合理范围内
+    # FFT on CUDA half/bfloat16 produces ComplexHalf values. Besides having
+    # incomplete operator support, an unnormalised HxW FFT can exceed the fp16
+    # range at training resolutions and turn the loss into Inf/NaN under AMP.
+    # Keep this loss in fp32; gradients still flow back through the cast.
+    if pred.dtype in (torch.float16, torch.bfloat16):
+        pred = pred.float()
+    if target.dtype in (torch.float16, torch.bfloat16):
+        target = target.float()
+
     pred = pred.clamp(0, 1)
     target = target.clamp(0, 1)
     
@@ -435,7 +444,7 @@ def frequency_high_freq_loss(pred, target, high_freq_ratio=0.3, reduction="mean"
     # 计算2D傅里叶变换
     def compute_dft(img):
         # 转换到频域
-        dft = torch.fft.fft2(img, dim=(-2, -1))
+        dft = torch.fft.fft2(img, dim=(-2, -1), norm="ortho")
         # 移到中心便于处理
         dft_shifted = torch.fft.fftshift(dft, dim=(-2, -1))
         return dft_shifted

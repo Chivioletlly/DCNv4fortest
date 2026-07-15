@@ -63,6 +63,44 @@ def test_decomposition_loss_exposes_consistent_per_sample_values():
     assert background.grad is not None
 
 
+def test_frequency_loss_promotes_half_inputs_to_float32():
+    prediction = torch.rand(1, 3, 64, 64, dtype=torch.float16, requires_grad=True)
+    target = torch.rand_like(prediction)
+
+    loss = frequency_high_freq_loss(prediction, target)
+
+    assert loss.dtype == torch.float32
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+
+
+def test_frequency_loss_uses_orthonormal_fft_scaling():
+    prediction = torch.rand(1, 3, 16, 16)
+    target = torch.rand_like(prediction)
+    mask = torch.ones(16, 16)
+    low_frequency_size = 5
+    center = 8
+    mask[
+        center - low_frequency_size // 2:center + low_frequency_size // 2 + 1,
+        center - low_frequency_size // 2:center + low_frequency_size // 2 + 1,
+    ] = 0
+
+    prediction_dft = torch.fft.fftshift(
+        torch.fft.fft2(prediction, dim=(-2, -1), norm="ortho"), dim=(-2, -1)
+    )
+    target_dft = torch.fft.fftshift(
+        torch.fft.fft2(target, dim=(-2, -1), norm="ortho"), dim=(-2, -1)
+    )
+    expected = (
+        torch.abs(torch.abs(prediction_dft * mask) - torch.abs(target_dft * mask))
+        .mean()
+    )
+
+    assert torch.allclose(frequency_high_freq_loss(prediction, target), expected)
+
+
 def test_degradation_types_are_normalized_per_sample():
     normalize = GeneralDecompositionTrainer._normalize_degradation_types
     assert normalize("rain", 2) == ["rain", "rain"]
