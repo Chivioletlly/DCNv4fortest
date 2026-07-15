@@ -9,24 +9,33 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
-if [[ -z "${CUDA_HOME:-}" ]]; then
-  if [[ -x /usr/local/cuda-12.4/bin/nvcc ]]; then
+if [[ -z "${CUDA_HOME:-}" || ! -x "${CUDA_HOME:-}/bin/nvcc" ]]; then
+  if command -v nvcc >/dev/null 2>&1; then
+    NVCC_PATH="$(readlink -f "$(command -v nvcc)")"
+    DETECTED_CUDA_HOME="$(dirname "$(dirname "${NVCC_PATH}")")"
+    if [[ -n "${CUDA_HOME:-}" ]]; then
+      echo "CUDA_HOME=${CUDA_HOME} does not contain nvcc; using ${DETECTED_CUDA_HOME}." >&2
+    fi
+    export CUDA_HOME="${DETECTED_CUDA_HOME}"
+  elif [[ -x /usr/local/cuda-12.4/bin/nvcc ]]; then
     export CUDA_HOME=/usr/local/cuda-12.4
+  elif [[ -x /usr/local/cuda-12.1/bin/nvcc ]]; then
+    export CUDA_HOME=/usr/local/cuda-12.1
   else
-    echo "Set CUDA_HOME to the CUDA Toolkit 12.4 installation directory." >&2
+    echo "Could not find nvcc. Install CUDA Toolkit 12.4, or set CUDA_HOME to a CUDA 12.1/12.4 toolkit." >&2
     exit 1
   fi
 fi
 
-if [[ ! -x "${CUDA_HOME}/bin/nvcc" ]]; then
-  echo "nvcc was not found at ${CUDA_HOME}/bin/nvcc." >&2
+NVCC_VERSION="$(${CUDA_HOME}/bin/nvcc --version | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p')"
+if [[ "${NVCC_VERSION}" != "12.4" && "${NVCC_VERSION}" != "12.1" ]]; then
+  echo "Expected nvcc 12.4 or the CUDA-minor-compatible 12.1 fallback, found ${NVCC_VERSION:-unknown}." >&2
   exit 1
 fi
 
-NVCC_VERSION="$(${CUDA_HOME}/bin/nvcc --version | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p')"
-if [[ "${NVCC_VERSION}" != "12.4" ]]; then
-  echo "Expected nvcc 12.4, found ${NVCC_VERSION:-unknown}." >&2
-  exit 1
+if [[ "${NVCC_VERSION}" == "12.1" ]]; then
+  echo "Warning: building PyTorch cu124 DCNv4 with nvcc 12.1; this is an unverified CUDA minor-version fallback." >&2
+  echo "The smoke test below must pass before training." >&2
 fi
 
 python - <<'PY'
