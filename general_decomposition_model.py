@@ -3,6 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+try:
+    from .image_geometry import crop_to_size, pad_to_multiple
+except ImportError:  # Support running this file directly from the repository root.
+    from image_geometry import crop_to_size, pad_to_multiple
+
 
 ARCHITECTURE_VERSION = 2
 DIRECTION_BLOCK_TYPE = "dcnv4"
@@ -276,6 +281,7 @@ class FeatureDisentanglement(nn.Module):
         a_c = a_flat - a_flat.mean(dim=2, keepdim=True)
         b_c = b_flat - b_flat.mean(dim=2, keepdim=True)
         cross = torch.bmm(a_c, b_c.transpose(1, 2))        # [B, C, C]
+        cross = cross / max(1, a_flat.shape[-1])
         return cross.abs().mean()
 
     def forward(self, x):
@@ -330,6 +336,8 @@ class GeneralDecompositionNet(nn.Module):
 
     def forward(self, x):
 
+        x, original_size = pad_to_multiple(x)
+
         enc_feats = self.encoder(x)
 
         bottleneck = self.bottleneck(enc_feats[-1])
@@ -343,7 +351,11 @@ class GeneralDecompositionNet(nn.Module):
         pattern    = self.pattern_head(pat_refined)
         background = self.bg_head(bg_refined)
 
-        return pattern, background, orth_loss
+        return (
+            crop_to_size(pattern, original_size),
+            crop_to_size(background, original_size),
+            orth_loss,
+        )
 ##replace l2 with l1 loss, and add SSIM loss for better perceptual quality in rain degradation.
 
 ##realize ssim loss 

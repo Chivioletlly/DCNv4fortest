@@ -21,6 +21,11 @@ from general_decomp.general_decomposition_model import (
     validate_checkpoint_architecture,
 )
 from general_decomp.dataset import build_dataloader
+from general_decomp.training_schedule import (
+    format_patch_schedule,
+    parse_patch_schedule,
+    patch_size_for_epoch,
+)
 
 
 class GeneralDecompositionTrainer:
@@ -29,6 +34,34 @@ class GeneralDecompositionTrainer:
         self.config = dict(config)
         self.config['architecture_version'] = ARCHITECTURE_VERSION
         self.config['direction_block_type'] = DIRECTION_BLOCK_TYPE
+        self.patch_schedule = parse_patch_schedule(
+            self.config.get('patch_schedule') or ()
+        )
+        self.config['patch_schedule'] = list(format_patch_schedule(self.patch_schedule))
+        self.native_validation = bool(
+            self.config.get('native_validation', False) or self.patch_schedule
+        )
+        self.config['native_validation'] = self.native_validation
+        self.config['spatial_training_mode'] = (
+            'progressive_patch' if self.patch_schedule else 'fixed_resize'
+        )
+        if self.patch_schedule:
+            self.config['image_height'] = None
+            self.config['image_width'] = None
+        if self.config.get('resume_from') and self.config.get('init_from'):
+            raise ValueError('resume_from and init_from are mutually exclusive')
+        final_stage_after_training = (
+            self.patch_schedule
+            and self.patch_schedule[-1].start_epoch > self.config.get('epochs', 200)
+        )
+        if final_stage_after_training:
+            raise ValueError('The final patch stage starts after the configured training epochs')
+        if (
+            self.native_validation
+            and self.config.get('val_input_dir')
+            and self.config.get('val_batch_size', 4) != 1
+        ):
+            raise ValueError('Native-resolution validation requires --val_batch_size 1')
         config = self.config
         self.device = torch.device(
             config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
@@ -99,32 +132,48 @@ class GeneralDecompositionTrainer:
         )
         self.logger = logging.getLogger(__name__)
 
-    def _make_dataloader(self, input_dir, bg_dir, pattern_dir, degradation_types, shuffle):
-        bs = self.config.get('batch_size', 8) if shuffle else self.config.get('val_batch_size', 4)
+    def _make_dataloader(
+        self, input_dir, bg_dir, pattern_dir, degradation_types, sample_stems_dir,
+        is_train
+    ):
+        bs = (
+            self.config.get('batch_size', 8)
+            if is_train else self.config.get('val_batch_size', 4)
+        )
+        patch_size = (
+            patch_size_for_epoch(self.patch_schedule, 0)
+            if is_train and self.patch_schedule else None
+        )
+        native_size = (is_train and self.patch_schedule) or (
+            not is_train and self.native_validation
+        )
         loader, ds = build_dataloader(
             input_dir=input_dir,
             bg_dir=bg_dir,
             pattern_dir=pattern_dir,
             degradation_types=degradation_types,
-            height=self.config.get('image_height', 512),
-            width=self.config.get('image_width', 512),
+            sample_stems_dir=sample_stems_dir,
+            height=None if native_size else self.config.get('image_height', 512),
+            width=None if native_size else self.config.get('image_width', 512),
+            patch_size=patch_size,
             batch_size=bs,
-            augment=shuffle,
-            shuffle=shuffle,
+            augment=is_train,
+            shuffle=is_train,
             num_workers=self.config.get('num_workers', 4),
         )
         return loader, ds
 
     def create_dataloaders(self):
-        self.train_loader, train_ds = self._make_dataloader(
+        self.train_loader, self.train_dataset = self._make_dataloader(
             input_dir=self.config['input_dir'],
             bg_dir=self.config.get('bg_dir'),
             pattern_dir=self.config.get('pattern_dir'),
             degradation_types=self.config.get('degradation_types'),
-            shuffle=True,
+            sample_stems_dir=self.config.get('train_stems_dir'),
+            is_train=True,
         )
         self.logger.info('Train set: %d samples (degradation types: %s)',
-                         len(train_ds), train_ds.degradation_types)
+                         len(self.train_dataset), self.train_dataset.degradation_types)
 
         self.val_loader = None
         if self.config.get('val_input_dir'):
@@ -133,7 +182,8 @@ class GeneralDecompositionTrainer:
                 bg_dir=self.config.get('val_bg_dir'),
                 pattern_dir=self.config.get('val_pattern_dir'),
                 degradation_types=self.config.get('val_degradation_types'),
-                shuffle=False,
+                sample_stems_dir=self.config.get('val_stems_dir'),
+                is_train=False,
             )
             self.logger.info('Val set: %d samples (degradation types: %s)',
                              len(val_ds), val_ds.degradation_types)
@@ -235,6 +285,21 @@ class GeneralDecompositionTrainer:
     # Train / validate
     # ------------------------------------------------------------------
 
+    def _set_training_patch(self, epoch: int):
+        if not self.patch_schedule:
+            return None
+        patch_size = patch_size_for_epoch(self.patch_schedule, epoch)
+        if self.train_dataset.patch_size != patch_size:
+            self.train_dataset.set_patch_size(patch_size)
+            self.logger.info(
+                'Progressive patch stage: epoch %d uses %dx%d crops',
+                epoch + 1,
+                patch_size,
+                patch_size,
+            )
+        self.writer.add_scalar('train_epoch/patch_size', patch_size, epoch + 1)
+        return patch_size
+
     def _forward_and_loss(self, inp, bg_gt, pattern_gt):
         pattern, background, orth_loss = self.model(inp)
         total_loss, loss_dict, per_sample_losses = self.criterion(
@@ -320,6 +385,16 @@ class GeneralDecompositionTrainer:
                 loss_dict['recon_mse'] = recon_mse.mean()
                 per_sample_losses = dict(per_sample_losses)
                 per_sample_losses['recon_mse'] = recon_mse.cpu()
+                if bg_gt is not None:
+                    bg_mse = (background - bg_gt).square().flatten(1).mean(dim=1)
+                    bg_psnr = -10.0 * torch.log10(bg_mse.clamp_min(1e-10))
+                    bg_ssim = 1.0 - self.criterion.ssim_loss(
+                        background, bg_gt, reduction='none'
+                    )
+                    loss_dict['bg_psnr'] = bg_psnr.mean()
+                    loss_dict['bg_ssim_score'] = bg_ssim.mean()
+                    per_sample_losses['bg_psnr'] = bg_psnr.cpu()
+                    per_sample_losses['bg_ssim_score'] = bg_ssim.cpu()
                 self._accumulate_loss_stats(
                     val_stats, loss_dict, per_sample_losses, degradation_types
                 )
@@ -335,6 +410,7 @@ class GeneralDecompositionTrainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_loss': self.best_val_loss,
             'global_step': self.global_step,
+            'current_patch_size': self.train_dataset.patch_size,
             'config': self.config,
         }
         torch.save(ckpt, os.path.join(self.checkpoint_dir, 'latest.pth'))
@@ -353,6 +429,14 @@ class GeneralDecompositionTrainer:
             return 0
         ckpt = torch.load(path, map_location=self.device)
         validate_checkpoint_architecture(ckpt.get('config', {}))
+        checkpoint_schedule = parse_patch_schedule(
+            ckpt.get('config', {}).get('patch_schedule') or ()
+        )
+        if checkpoint_schedule != self.patch_schedule:
+            raise ValueError(
+                'Checkpoint patch_schedule does not match the current run. '
+                'Use --init_from to load model weights with a new schedule.'
+            )
         self.model.load_state_dict(ckpt['model_state_dict'])
         self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
@@ -363,6 +447,18 @@ class GeneralDecompositionTrainer:
         )
         self.logger.info('Resumed after epoch %d (%s)', epoch + 1, path)
         return epoch + 1
+
+    def load_initial_weights(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f'Initialization checkpoint not found: {path}')
+        ckpt = torch.load(path, map_location=self.device)
+        config = ckpt.get('config', {}) if isinstance(ckpt, dict) else {}
+        validate_checkpoint_architecture(config)
+        state_dict = ckpt.get('model_state_dict', ckpt)
+        self.model.load_state_dict(state_dict)
+        self.logger.info(
+            'Loaded model initialization from %s; optimizer and epoch were reset', path
+        )
 
 
 
@@ -518,8 +614,11 @@ class GeneralDecompositionTrainer:
         start_epoch = 0
         if self.config.get('resume_from'):
             start_epoch = self.load_checkpoint(self.config['resume_from'])
+        elif self.config.get('init_from'):
+            self.load_initial_weights(self.config['init_from'])
 
         for epoch in range(start_epoch, self.epochs):
+            self._set_training_patch(epoch)
             train_losses = self.train_epoch(epoch)
 
             val_losses = {}
@@ -558,6 +657,10 @@ def parse_args():
     parser.add_argument('--degradation_types', type=str, nargs='+', default=None,
                         help='List of degradation types (e.g., blur rain noise). '
                              'If not specified, will auto-detect from input_dir subfolders.')
+    parser.add_argument(
+        '--train_stems_dir', type=str, default=None,
+        help='Optional image directory whose filename stems select the training split',
+    )
     parser.add_argument('--val_input_dir',   type=str, default=None,
                         help='Validation input folder (optional)')
     parser.add_argument('--val_bg_dir',      type=str, default=None)
@@ -565,6 +668,10 @@ def parse_args():
     parser.add_argument('--val_degradation_types', type=str, nargs='+', default=None,
                         help='List of validation degradation types (optional). '
                              'If not specified, will auto-detect from val_input_dir subfolders.')
+    parser.add_argument(
+        '--val_stems_dir', type=str, default=None,
+        help='Optional image directory whose filename stems select the validation split',
+    )
 
     # Training
     parser.add_argument('--epochs',         type=int,   default=200)
@@ -593,6 +700,23 @@ def parse_args():
                         help='Use residual DCNv4 blocks in encoder and pattern branch')
     parser.add_argument('--image_height',  type=int, default=512)
     parser.add_argument('--image_width',   type=int, default=512)
+    parser.add_argument(
+        '--patch_schedule',
+        type=str,
+        nargs='+',
+        default=None,
+        metavar='EPOCH:SIZE',
+        help=(
+            'Enable Restormer-style progressive crops from original images. '
+            'Example: 1:128 11:160 26:192 41:256 61:320 81:384. '
+            'Patch sizes must be multiples of 8.'
+        ),
+    )
+    parser.add_argument(
+        '--native_validation',
+        action='store_true',
+        help='Validate at each image original size (requires --val_batch_size 1)',
+    )
 
     # Misc
     parser.add_argument('--num_workers',    type=int, default=4)
@@ -603,7 +727,15 @@ def parse_args():
     parser.add_argument('--tensorboard_dir',type=str, default=None)
     parser.add_argument('--device',         type=str,
                         default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--resume_from',    type=str, default=None)
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument(
+        '--resume_from', type=str, default=None,
+        help='Resume model, optimizer, scheduler, epoch, and the same patch schedule',
+    )
+    checkpoint_group.add_argument(
+        '--init_from', type=str, default=None,
+        help='Load compatible model weights only and start a new training run',
+    )
 
     return parser.parse_args()
 

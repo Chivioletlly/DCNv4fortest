@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torchvision.utils as vutils
-from torch.utils.data import DataLoader
+import torchvision.transforms.functional as TF
 from PIL import Image
 import matplotlib.pyplot as plt
 import argparse
@@ -27,12 +27,19 @@ from general_decomp.dataset import build_dataloader
 
 class GeneralDecompositionInference:
 
-    def __init__(self, checkpoint_path: str, bottleneck_type: str = 'conv', device: str = 'cuda'):
+    def __init__(
+        self,
+        checkpoint_path: str,
+        bottleneck_type: str = None,
+        device: str = 'cuda',
+        resize_to_checkpoint: bool = False,
+    ):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.bottleneck_type = bottleneck_type
 
         ckpt = torch.load(checkpoint_path, map_location=self.device)
         self.config = ckpt.get('config', {})
+        self.bottleneck_type = bottleneck_type or self.config.get('bottleneck_type', 'conv')
+        self.resize_to_checkpoint = resize_to_checkpoint
         validate_checkpoint_architecture(self.config)
         if self.config.get('use_orient_block', False) and self.device.type != 'cuda':
             raise RuntimeError('DCNv4 inference requires a CUDA GPU')
@@ -58,10 +65,11 @@ class GeneralDecompositionInference:
     # ------------------------------------------------------------------
 
     def create_dataloader(self, input_dir: str, batch_size: int = 1):
+        height, width = self._requested_size()
         loader, ds = build_dataloader(
             input_dir=input_dir,
-            height=self.config.get('image_height', 512),
-            width=self.config.get('image_width', 512),
+            height=height,
+            width=width,
             batch_size=batch_size,
             augment=False,
             shuffle=False,
@@ -114,14 +122,11 @@ class GeneralDecompositionInference:
     # ------------------------------------------------------------------
 
     def inference_single_image(self, image_path: str, save_path: str = None):
-        from torchvision import transforms
-
-        h = self.config.get('image_height', 512)
-        w = self.config.get('image_width',  512)
-        tf = transforms.Compose([transforms.Resize((h, w)), transforms.ToTensor()])
-
         img = Image.open(image_path).convert('RGB')
-        inp = tf(img).unsqueeze(0).to(self.device)
+        height, width = self._requested_size()
+        if height is not None and width is not None:
+            img = TF.resize(img, [height, width], interpolation=Image.BICUBIC)
+        inp = TF.to_tensor(img).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             pattern, background, _ = self.model(inp)
@@ -150,6 +155,17 @@ class GeneralDecompositionInference:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _requested_size(self):
+        if not self.resize_to_checkpoint:
+            return None, None
+        height = self.config.get('image_height')
+        width = self.config.get('image_width')
+        if height is None or width is None:
+            raise ValueError(
+                '--resize_to_checkpoint was requested, but this checkpoint has no fixed size'
+            )
+        return int(height), int(width)
 
     @staticmethod
     def _display(grid_tensor, title):
@@ -181,16 +197,26 @@ def parse_args():
     parser.add_argument('--save_dir',    type=str,
                         default='./inference_results/general_decomp')
     parser.add_argument('--device',      type=str, default='cuda')
-    parser.add_argument('--bottleneck_type', type=str, default='conv',
+    parser.add_argument('--bottleneck_type', type=str, default=None,
                         choices=['conv', 'transformer'],
-                        help='Bottleneck type: conv (fast) or transformer (accurate)')
+                        help='Override checkpoint bottleneck type')
+    parser.add_argument(
+        '--resize_to_checkpoint',
+        action='store_true',
+        help='Use the legacy checkpoint image_height/image_width instead of native size',
+    )
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    inferencer = GeneralDecompositionInference(args.checkpoint, args.bottleneck_type, args.device)
+    inferencer = GeneralDecompositionInference(
+        args.checkpoint,
+        args.bottleneck_type,
+        args.device,
+        resize_to_checkpoint=args.resize_to_checkpoint,
+    )
 
     if args.input_dir:
         loader = inferencer.create_dataloader(args.input_dir, args.batch_size)
