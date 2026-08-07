@@ -65,6 +65,37 @@ pytest -q tests/test_dcnv4_restoration_model.py
 python tests/test_dcnv4_restoration_model.py
 ```
 
+## AIO3-v1 data audit and manifests
+
+The first stage of the frozen AIO3-v1 pipeline is implemented in `aio3_runner`.
+It strictly pairs RainTrainL, Rain100L, OTS, and SOTS by identifiers, creates
+scene-disjoint train/validation splits, assigns reproducible Gaussian-noise seeds,
+verifies every used image and paired spatial size, and writes deterministic JSONL
+manifests plus an audit report. It intentionally excludes `WED/noisy` and all
+`rainregion-*` files.
+
+On the training server, run the full audit once before implementing or launching
+training:
+
+```bash
+cd /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/all-in-one-model/DCNv4
+
+python -m aio3_runner.prepare_data \
+  --data-root /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/data/AIO3 \
+  --output-dir /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/outputs/AIO3/aio3-v1/manifests
+```
+
+The command refuses to overwrite an existing audit by default. Do not use
+`--skip-image-verification` for a formal run. The protocol, exact counts, split rules,
+metrics, W&B layout, and output contract are defined in
+`docs/AIO3_TRAINING_EVALUATION_PROTOCOL.md`.
+
+The manifest tests can run without pytest:
+
+```bash
+python tests/test_aio3_manifests.py
+```
+
 ## Installation
 
 ```bash

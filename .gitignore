@@ -15,4 +15,5 @@ inference_results/
 results/
 test_images/
 tensorboard/
+.tmp_aio3_manifest_tests/
 train_notebook.ipynb
