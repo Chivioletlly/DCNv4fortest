@@ -143,10 +143,12 @@ class DCNv4FeatureBlock(nn.Module):
     """Residual DCNv4 feature block using GroupNorm.
 
     The official DCNv4 CUDA backward kernel supports FP32 and FP16, but not
-    BF16. When the surrounding network is under BF16 autocast, the DCNv4
-    operator therefore runs locally in FP32 and its output is cast back to the
-    surrounding feature dtype. Parameters remain FP32 as required by normal
-    AMP training; callers should not convert the whole model to BF16.
+    BF16. The DCNv4 operator therefore always runs locally with autocast
+    disabled and FP32 inputs, then its output is cast back to the surrounding
+    feature dtype. This is required even when the incoming feature is FP32:
+    an outer BF16 autocast context would otherwise cast DCNv4's internal
+    Linear layers to BF16. Parameters remain FP32 as required by normal AMP
+    training; callers should not convert the whole model to BF16.
     """
 
     def __init__(
@@ -215,17 +217,14 @@ class DCNv4FeatureBlock(nn.Module):
         height: int,
         width: int,
     ) -> torch.Tensor:
-        """Run BF16 inputs through the FP32-only DCNv4 backward path safely."""
-
-        if sequence.dtype != torch.bfloat16:
-            return self.dcn(sequence, shape=(height, width))
+        """Run DCNv4 in FP32 without inheriting the surrounding AMP context."""
 
         parameter = next(self.dcn.parameters(), None)
         if parameter is not None and parameter.dtype != torch.float32:
             raise RuntimeError(
-                "DCNv4 BF16 compatibility requires FP32 master parameters. "
+                "DCNv4 AMP compatibility requires FP32 master parameters. "
                 "Keep the model in FP32 and use torch.autocast instead of "
-                "calling model.bfloat16()."
+                "casting the model parameters to a reduced precision dtype."
             )
 
         feature_dtype = sequence.dtype

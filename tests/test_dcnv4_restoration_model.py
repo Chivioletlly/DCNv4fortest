@@ -24,13 +24,17 @@ class FakeDCNv4(nn.Module):
     def __init__(self, channels, group, **_kwargs):
         super().__init__()
         self.offset_mask = nn.Linear(channels, group * 27)
+        self.value_proj = nn.Linear(channels, channels)
         self.last_input_dtype = None
+        self.last_output_dtype = None
 
     def forward(self, x, shape):
         height, width = shape
         assert x.shape[1] == height * width
         self.last_input_dtype = x.dtype
-        return x
+        output = self.value_proj(x)
+        self.last_output_dtype = output.dtype
+        return output
 
 
 def build_model():
@@ -112,6 +116,22 @@ def test_bfloat16_features_use_float32_inside_dcn_and_keep_gradients():
 
     assert block.dcn.last_input_dtype == torch.float32
     assert output.dtype == torch.bfloat16
+    assert sequence.grad is not None
+    assert torch.isfinite(sequence.grad).all()
+
+
+def test_float32_features_do_not_inherit_outer_bfloat16_autocast():
+    block = DCNv4FeatureBlock(32, dcnv4_cls=FakeDCNv4).train()
+    sequence = torch.randn(1, 8 * 8, 32, requires_grad=True)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = block._apply_dcn(sequence, height=8, width=8)
+        loss = output.square().mean()
+    loss.backward()
+
+    assert block.dcn.last_input_dtype == torch.float32
+    assert block.dcn.last_output_dtype == torch.float32
+    assert output.dtype == torch.float32
     assert sequence.grad is not None
     assert torch.isfinite(sequence.grad).all()
 

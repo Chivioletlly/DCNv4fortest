@@ -23,10 +23,13 @@ exact identity mapping. Checkpoints must store the metadata returned by
 incompatible.
 
 The official DCNv4 CUDA backward kernel supports FP32 and FP16 but not BF16.
-Under BF16 autocast, each `DCNv4FeatureBlock` therefore runs only its DCNv4
-operator in FP32 and casts the result back to BF16; the rest of the U-Net stays
-under BF16 autocast. Keep model parameters in FP32 and use `torch.autocast`
-rather than calling `model.bfloat16()`.
+Each `DCNv4FeatureBlock` therefore disables autocast around its DCNv4 operator,
+runs that operator in FP32, and casts the result back to the incoming feature
+dtype; the rest of the U-Net stays under BF16 autocast. The explicit autocast
+boundary is also necessary for FP32 incoming features because DCNv4's internal
+Linear layers would otherwise inherit the outer BF16 context. Keep model
+parameters in FP32 and use `torch.autocast` rather than calling
+`model.bfloat16()`.
 
 ```python
 from dcnv4_restoration_model import DCNv4RestorationUNet
