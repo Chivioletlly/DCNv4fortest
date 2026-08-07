@@ -2,6 +2,57 @@
 
 General Degradation Decomposition Network for image processing and restoration tasks.
 
+## AIO-3 DCNv4 restoration baseline
+
+`dcnv4_restoration_model.py` adds a degradation-agnostic restoration baseline without
+changing the legacy pattern/background decomposition network. Its U-Net encoder keeps
+three multi-scale DCNv4 blocks and the fourth DCNv4 block is placed in a signed RGB
+residual head:
+
+```text
+decoder feature -> Conv 64->32 -> GroupNorm -> ReLU -> DCNv4 -> linear Conv 32->3
+restored_raw = degraded + signed_residual
+```
+
+All convolutional BatchNorm layers are replaced by GroupNorm. Hidden activations remain
+nonlinear, but the final RGB residual has no ReLU, Sigmoid, Tanh, or training-time
+clamp. The final convolution is zero-initialized, so a newly constructed model is an
+exact identity mapping. Checkpoints must store the metadata returned by
+`model.checkpoint_metadata()` and use `architecture_version=3` and
+`output_mode=signed_residual`; legacy decomposition checkpoints are intentionally
+incompatible.
+
+```python
+from dcnv4_restoration_model import DCNv4RestorationUNet
+
+model = DCNv4RestorationUNet(
+    in_channels=3,
+    base_channels=64,
+    bottleneck_type="conv",
+    use_dcnv4=True,
+).cuda()
+
+restored_raw = model(degraded)  # Do not clamp before the training loss.
+loss = (restored_raw - clean).abs().mean()
+```
+
+After building the vendored DCNv4 extension, run the CUDA/BF16 integration test:
+
+```bash
+python scripts/test_dcnv4_restoration.py \
+  --batch-size 1 \
+  --height 128 \
+  --width 128
+```
+
+CPU unit tests inject an interface-compatible stand-in for the CUDA operator and verify
+arbitrary-size output, exact identity initialization, signed/unclamped residuals, four
+DCNv4 blocks, GroupNorm-only convolutional paths, gradients, and checkpoint rejection:
+
+```bash
+pytest -q tests/test_dcnv4_restoration_model.py
+```
+
 ## Installation
 
 ```bash
