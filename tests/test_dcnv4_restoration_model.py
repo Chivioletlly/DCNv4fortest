@@ -24,10 +24,12 @@ class FakeDCNv4(nn.Module):
     def __init__(self, channels, group, **_kwargs):
         super().__init__()
         self.offset_mask = nn.Linear(channels, group * 27)
+        self.last_input_dtype = None
 
     def forward(self, x, shape):
         height, width = shape
         assert x.shape[1] == height * width
+        self.last_input_dtype = x.dtype
         return x
 
 
@@ -92,6 +94,26 @@ def test_output_head_receives_gradient_from_l1_loss():
     assert gradient is not None
     assert torch.isfinite(gradient).all()
     assert gradient.abs().sum().item() > 0.0
+
+
+def test_bfloat16_features_use_float32_inside_dcn_and_keep_gradients():
+    block = DCNv4FeatureBlock(32, dcnv4_cls=FakeDCNv4).train()
+    sequence = torch.randn(
+        1,
+        8 * 8,
+        32,
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    output = block._apply_dcn(sequence, height=8, width=8)
+    loss = output.float().square().mean()
+    loss.backward()
+
+    assert block.dcn.last_input_dtype == torch.float32
+    assert output.dtype == torch.bfloat16
+    assert sequence.grad is not None
+    assert torch.isfinite(sequence.grad).all()
 
 
 def test_checkpoint_metadata_identifies_restoration_architecture():

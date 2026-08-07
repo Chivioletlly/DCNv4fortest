@@ -1,4 +1,4 @@
-"""CUDA/BF16 smoke test for DCNv4RestorationUNet."""
+"""CUDA/BF16 smoke test with an FP32 DCNv4 operator fallback."""
 
 import argparse
 import sys
@@ -72,7 +72,7 @@ def main():
         "peak memory GiB:",
         torch.cuda.max_memory_allocated(device) / 1024**3,
     )
-    print("BF16 DCNv4 restoration forward/backward: PASS")
+    print("BF16 network / FP32 DCNv4 restoration forward/backward: PASS")
 
 
 if __name__ == "__main__":

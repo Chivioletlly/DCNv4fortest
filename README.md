@@ -22,6 +22,12 @@ exact identity mapping. Checkpoints must store the metadata returned by
 `output_mode=signed_residual`; legacy decomposition checkpoints are intentionally
 incompatible.
 
+The official DCNv4 CUDA backward kernel supports FP32 and FP16 but not BF16.
+Under BF16 autocast, each `DCNv4FeatureBlock` therefore runs only its DCNv4
+operator in FP32 and casts the result back to BF16; the rest of the U-Net stays
+under BF16 autocast. Keep model parameters in FP32 and use `torch.autocast`
+rather than calling `model.bfloat16()`.
+
 ```python
 from dcnv4_restoration_model import DCNv4RestorationUNet
 
@@ -47,10 +53,13 @@ python scripts/test_dcnv4_restoration.py \
 
 CPU unit tests inject an interface-compatible stand-in for the CUDA operator and verify
 arbitrary-size output, exact identity initialization, signed/unclamped residuals, four
-DCNv4 blocks, GroupNorm-only convolutional paths, gradients, and checkpoint rejection:
+DCNv4 blocks, GroupNorm-only convolutional paths, BF16-to-FP32 DCNv4 fallback,
+gradients, and checkpoint rejection. The test file can be run directly when `pytest`
+is not installed:
 
 ```bash
 pytest -q tests/test_dcnv4_restoration_model.py
+python tests/test_dcnv4_restoration_model.py
 ```
 
 ## Installation

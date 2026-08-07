@@ -140,7 +140,14 @@ class TransformerBottleneck(nn.Module):
 
 
 class DCNv4FeatureBlock(nn.Module):
-    """Residual DCNv4 feature block using GroupNorm."""
+    """Residual DCNv4 feature block using GroupNorm.
+
+    The official DCNv4 CUDA backward kernel supports FP32 and FP16, but not
+    BF16. When the surrounding network is under BF16 autocast, the DCNv4
+    operator therefore runs locally in FP32 and its output is cast back to the
+    surrounding feature dtype. Parameters remain FP32 as required by normal
+    AMP training; callers should not convert the whole model to BF16.
+    """
 
     def __init__(
         self,
@@ -202,6 +209,30 @@ class DCNv4FeatureBlock(nn.Module):
                     1.0 / kernel_points
                 )
 
+    def _apply_dcn(
+        self,
+        sequence: torch.Tensor,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """Run BF16 inputs through the FP32-only DCNv4 backward path safely."""
+
+        if sequence.dtype != torch.bfloat16:
+            return self.dcn(sequence, shape=(height, width))
+
+        parameter = next(self.dcn.parameters(), None)
+        if parameter is not None and parameter.dtype != torch.float32:
+            raise RuntimeError(
+                "DCNv4 BF16 compatibility requires FP32 master parameters. "
+                "Keep the model in FP32 and use torch.autocast instead of "
+                "calling model.bfloat16()."
+            )
+
+        feature_dtype = sequence.dtype
+        with torch.autocast(device_type=sequence.device.type, enabled=False):
+            output = self.dcn(sequence.float(), shape=(height, width))
+        return output.to(dtype=feature_dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 4 or x.shape[1] != self.channels:
             raise ValueError(
@@ -214,7 +245,7 @@ class DCNv4FeatureBlock(nn.Module):
             .reshape(batch, height * width, channels)
             .contiguous()
         )
-        output = self.dcn(sequence, shape=(height, width))
+        output = self._apply_dcn(sequence, height, width)
         output = (
             output.reshape(batch, height, width, channels)
             .permute(0, 3, 1, 2)
