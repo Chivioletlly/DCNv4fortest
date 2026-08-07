@@ -28,7 +28,11 @@ DCNV4_BLOCK_TYPE = "dcnv4"
 
 try:
     from DCNv4.modules.dcnv4 import DCNv4 as _DCNv4
-except (ImportError, OSError) as exc:
+# Some DCNv4 releases query CUDA device properties while importing. Defer
+# missing-driver and binary-runtime failures so CPU structure tests can still
+# inject a stand-in operator; constructing a real DCNv4 block will re-raise the
+# original failure with the build guidance below.
+except (ImportError, OSError, RuntimeError) as exc:
     _DCNV4_IMPORT_ERROR = exc
     _DCNv4 = None
 else:
