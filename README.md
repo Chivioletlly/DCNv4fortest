@@ -96,6 +96,37 @@ The manifest tests can run without pytest:
 python tests/test_aio3_manifests.py
 ```
 
+The second stage provides deterministic manifest datasets and a scene-balanced
+`4 denoise + 4 derain + 4 dehaze` batch sampler. Every training request carries an
+augmentation seed derived from the global optimizer step, so DataLoader prefetching
+does not change crops, flips, rotations, noise levels, or Gaussian noise after resume.
+Validation and test loaders retain native resolution with batch size 1.
+
+```python
+from aio3_runner.data import build_eval_dataloader, build_train_dataloader
+
+train_loader, train_dataset, train_sampler = build_train_dataloader(
+    "/path/to/manifests/train.jsonl",
+    patch_size=128,
+    start_step=0,
+    num_batches=200000,
+    seed=3407,
+    num_workers=8,
+)
+
+val_loader, val_dataset = build_eval_dataloader(
+    "/path/to/manifests/val.jsonl",
+    split="val",
+    num_workers=4,
+)
+```
+
+Run the dataset/sampler tests in the PyTorch training environment:
+
+```bash
+python tests/test_aio3_data.py
+```
+
 ## Installation
 
 ```bash

@@ -262,6 +262,26 @@ OTS 的退化图数量远大于其他任务，不能简单拼接三个数据集�
 若未来模型显存不足，只允许减小 micro-batch 并使用梯度累积，**有效 batch 必须仍为
 12，且每次 optimizer step 的三个任务贡献仍为 1:1:1**。改变有效 batch 属于新协议。
 
+### 7.1 当前 Dataset 与平衡采样实现
+
+`aio3_runner.data.AIO3ManifestDataset` 直接读取冻结 manifest。训练模式执行同步 padding、
+128裁剪、水平/垂直翻转、90度旋转和在线高斯噪声；验证/测试保持原始分辨率。
+
+`BalancedTaskBatchSampler` 不直接按73859条记录均匀抽样，而是先按任务，再按scene均匀
+抽取，最后在该scene内选择退化版本。每个 batch 精确包含4个 denoise、4个 derain、
+4个 dehaze。
+
+采样器为每个 `global_step` 生成 `(record_index, sample_seed)` 请求，Dataset 的裁剪、
+增强、sigma和噪声全部只由该 seed 决定。因此 worker 数量和预取顺序不影响样本；从
+checkpoint 的 `global_step` 重建 sampler 后，下一批请求与不中断训练完全相同。
+
+服务器测试命令：
+
+```bash
+cd /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/all-in-one-model/DCNv4
+python tests/test_aio3_data.py
+```
+
 ## 8. 模型公共接口
 
 公共 runner 通过模型 adapter 创建模型。adapter 必须实现：
