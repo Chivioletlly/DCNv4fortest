@@ -374,10 +374,12 @@ BF16 使用 `torch.autocast(device_type="cuda", dtype=torch.bfloat16)`，不使�
 GradScaler。每次 optimizer step 前将全模型梯度范数裁剪到 1.0。scheduler 按
 optimizer step 更新，而不是按数据集 epoch 更新。
 
-warmup cosine 的定义也必须保持一致：前 2000 个 optimizer steps 将学习率从 0
-线性增加到 `2e-4`；之后使用单周期 cosine 从 `2e-4` 降至 `1e-6`，并在
-`global_step=200000` 达到最小学习率。optimizer 更新完成后再推进一次 scheduler，
-恢复训练时从 checkpoint 中的 scheduler 状态继续，禁止根据当前 step 重新猜测状态。
+warmup cosine 的定义也必须保持一致。以从 0 开始计数的 optimizer update index
+`i` 表示下一次参数更新：前 2000 次更新使用 `base_lr * (i + 1) / 2000`，因此第一次
+更新使用 `1e-7`，第 2000 次更新达到 `2e-4`；之后使用单周期 cosine，在第 200000 次
+更新使用 `1e-6`。optimizer 更新完成后再推进一次 scheduler。checkpoint 中保存的
+`completed_steps` 是已经成功完成的 optimizer 更新数，恢复后由 scheduler 状态精确设置
+下一次更新的学习率，禁止根据日志或 dataloader batch index 猜测状态。
 
 开发顺序固定为：
 
