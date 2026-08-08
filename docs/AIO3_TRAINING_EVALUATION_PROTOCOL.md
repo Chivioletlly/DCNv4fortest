@@ -67,8 +67,8 @@ OUTPUT_ROOT=/home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/output
 
 ## 3. 已知数据状态
 
-当前服务器数据统计如下。所有扫描均忽略隐藏文件和所有
-`.ipynb_checkpoints` 目录。
+当前服务器数据统计如下。有效图像统计忽略隐藏文件和所有
+`.ipynb_checkpoints` 目录；被有效图像规则排除的普通/隐藏文件会在审计报告中单列。
 
 | 数据集 | 当前有效文件状态 | 用途 |
 |---|---:|---|
@@ -77,8 +77,8 @@ OUTPUT_ROOT=/home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/output
 | BSD68 | 68 张图像 | 去噪正式测试清晰图 |
 | RainTrainL | `rain-*` 200 张，`norain-*` 200 张 | 去雨训练/验证 |
 | Rain100L | `rain` 100 张，`gt` 100 张 | 去雨正式测试 |
-| OTS | `clear` 2061 张，`haze` 72139 张 | 去雾训练/验证 |
-| SOTS Outdoor | input 500 张，target 492 张 | 去雾正式测试候选数据 |
+| OTS | `clear` 2061 张，72135 张有效 haze，另有4个被排除文件 | 去雾训练/验证 |
+| SOTS Outdoor | input 500 张，target 492 张，严格配对500组 | 去雾正式测试 |
 
 `RainTrainL/rainregion-*` 不属于本协议的恢复目标，必须排除。`OTS/depth` 也不
 参与 AIO-3 训练。
@@ -131,9 +131,9 @@ JSON Lines manifest，并同时输出 `data_audit.json` 和 manifest 的 SHA256�
 RainTrainL 和 Rain100L 的有效配对数分别必须为 200 和 100，否则停止实验。
 OTS 必须确认 2061 个 clear scene 均至少拥有一个有效 haze 版本；若不满足，不得按
 “1961 train + 100 val”继续训练，而应先修复数据并重新生成审计报告。
-SOTS 当前 target 少于 input，允许生成严格交集 manifest，但结果必须标记为
-`SOTS-outdoor-local-492`（实际数量以审计结果为准），不得称为完整的官方 500 张
-SOTS 结果。若以后补齐缺失 target，需要升级协议或同时保留原 492 子集结果。
+SOTS 的 500 张 input 必须全部成功配对。当前 500 张 input 映射到 492 个唯一 target
+文件，说明部分 target 被多个退化 input 复用，并不表示缺少8个测试样本。正式评测包含
+500个 input-target pair，同时在审计中记录492个唯一 target。
 
 ### 4.1 当前审计实现与服务器命令
 
@@ -151,8 +151,9 @@ python -m aio3_runner.prepare_data \
 ```
 
 正式运行默认对所有实际使用的图像执行完整 Pillow 解码，并检查每个真实 input/target
-pair 的宽高。OTS 有 72139 张 haze，首次审计需要一定磁盘读取时间。不要在正式审计中
-使用 `--skip-image-verification`。
+pair 的宽高。OTS 有 72135 张有效 haze，首次审计需要一定磁盘读取时间。额外4个
+非图像或隐藏文件会被排除并完整记录；不要在正式审计中使用
+`--skip-image-verification`。
 
 成功后固定生成：
 
@@ -435,7 +436,7 @@ SSIM 使用相同方式计算 macro。`best_macro_psnr.pth` 只按验证集 macr
 |---|---|---|
 | denoise | BSD68 | 固定噪声 sigma 15、25、50，共 68 x 3 个条件 |
 | derain | Rain100L | 审计通过的 100 对 |
-| dehaze | SOTS Outdoor | 当前严格配对交集，标记 local-492 |
+| dehaze | SOTS Outdoor | 500个严格配对样本，492个唯一target |
 
 测试要求：
 
@@ -594,7 +595,7 @@ run.summary["best/global_step"]
 - Python、W&B、PyTorch、torchvision、CUDA、Pillow、GPU 和 DCNv4 扩展版本；
 - BF16 autocast 与 DCNv4 FP32 隔离状态；
 - 当前是否使用 tiled inference；
-- 当前 SOTS 是否为 `local-492` 子集；
+- SOTS 是否为500个严格配对样本及其唯一target数量；
 - hostname、随机种子、有效 batch、worker 数量和启动命令。
 
 config 在 run 创建后视为只读。若恢复训练时 checkpoint config、manifest SHA256、模型
@@ -814,8 +815,8 @@ test/bsd68/mean/psnr
 test/bsd68/mean/ssim
 test/rain100l/psnr
 test/rain100l/ssim
-test/sots_local492/psnr
-test/sots_local492/ssim
+test/sots_outdoor/psnr
+test/sots_outdoor/ssim
 test/macro/psnr
 test/macro/ssim
 test/total_runtime_seconds
@@ -866,7 +867,7 @@ ${OUTPUT_ROOT}/dcnv4_unet/<run_name>/
         ├── BSD68_sigma25/
         ├── BSD68_sigma50/
         ├── Rain100L/
-        └── SOTS-outdoor-local-492/
+        └── SOTS-outdoor/
 ```
 
 `metrics.json` 必须包含协议版本、checkpoint SHA256、manifest SHA256、Git commits、
@@ -902,7 +903,7 @@ ${OUTPUT_ROOT}/dcnv4_unet/<run_name>/
 - 改变 loss、optimizer、学习率或总 optimizer steps；
 - 在某一模型上单独启用 EMA、预训练权重、TTA 或不同 tile 策略；
 - 改变 PSNR/SSIM 通道、裁边、clamp 或实现；
-- 补齐 SOTS 缺失 target 后将测试集从 local-492 扩展为完整集合。
+- 改变 SOTS 的500-pair测试manifest或其input-target映射。
 
 修复不改变数学行为的工程错误可以保留协议版本，但必须记录修复 commit，并重新运行
 受影响的实验。任何影响数据、梯度或指标数值的修复都应从头训练并生成新的 run。

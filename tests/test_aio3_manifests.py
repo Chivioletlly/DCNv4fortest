@@ -26,9 +26,10 @@ TEST_EXPECTATIONS = ProtocolExpectations(
     rain100_target_images=2,
     ots_clear_images=3,
     ots_haze_images=6,
+    ots_haze_excluded_files=1,
     sots_input_images=3,
     sots_target_images=2,
-    sots_paired_images=2,
+    sots_paired_images=3,
     denoise_validation_scenes=1,
     derain_validation_scenes=1,
     dehaze_validation_scenes=1,
@@ -73,6 +74,9 @@ def _build_synthetic_aio3(root: Path):
                 / f"{scene_id}_0.{8 + variant}_0.{1 + variant}.jpg",
                 value=110 + variant,
             )
+    (root / "OTS" / "haze" / ".DS_Store").write_text(
+        "not an image", encoding="utf-8"
+    )
 
     for scene_index in range(2):
         scene_id = f"{scene_index + 1:04d}"
@@ -85,7 +89,7 @@ def _build_synthetic_aio3(root: Path):
             value=121,
         )
     _save_image(
-        root / "SOTS" / "outdoor" / "input" / "9999_0.8_0.2.jpg",
+        root / "SOTS" / "outdoor" / "input" / "0001_0.9_0.1.jpg",
         value=122,
     )
 
@@ -144,8 +148,10 @@ def test_manifest_counts_pairing_and_split_isolation():
         assert audit["pairing"]["Rain100L_pairs"] == 2
         assert audit["pairing"]["OTS_pairs"] == 6
         assert audit["pairing"]["OTS_clear_scenes"] == 3
-        assert audit["pairing"]["SOTS_pairs"] == 2
-        assert len(audit["pairing"]["SOTS_inputs_without_target"]) == 1
+        assert audit["source_counts"]["OTS/haze_files_excluded"] == 1
+        assert len(audit["pairing"]["OTS_files_excluded"]) == 1
+        assert audit["pairing"]["SOTS_pairs"] == 3
+        assert not audit["pairing"]["SOTS_inputs_without_target"]
 
         assert audit["splits"]["train"]["rows_by_task"] == {
             "dehaze": 4,
@@ -158,7 +164,7 @@ def test_manifest_counts_pairing_and_split_isolation():
             "derain": 1,
         }
         assert audit["splits"]["test"]["rows_by_task"] == {
-            "dehaze": 2,
+            "dehaze": 3,
             "denoise": 6,
             "derain": 2,
         }

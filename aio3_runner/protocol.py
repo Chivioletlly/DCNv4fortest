@@ -28,10 +28,11 @@ class ProtocolExpectations:
     rain100_input_images: int = 100
     rain100_target_images: int = 100
     ots_clear_images: int = 2061
-    ots_haze_images: int = 72139
+    ots_haze_images: int = 72135
+    ots_haze_excluded_files: int = 4
     sots_input_images: int = 500
     sots_target_images: int = 492
-    sots_paired_images: int = 492
+    sots_paired_images: int = 500
     denoise_validation_scenes: int = 100
     derain_validation_scenes: int = 20
     dehaze_validation_scenes: int = 100

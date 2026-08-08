@@ -82,6 +82,29 @@ def find_images(directory: Path, recursive: bool = False) -> List[Path]:
     return sorted(paths, key=lambda value: (value.as_posix().casefold(), value.as_posix()))
 
 
+def find_excluded_files(directory: Path, recursive: bool = False) -> List[Path]:
+    """List files intentionally excluded by the image scanner.
+
+    Files inside notebook checkpoint directories are ignored entirely. Other
+    hidden files (for example .DS_Store) are reported so a raw `find` count can
+    be reconciled with the number of usable images.
+    """
+
+    if not directory.is_dir():
+        raise AuditError(f"Required directory does not exist: {directory}")
+    iterator = directory.rglob("*") if recursive else directory.iterdir()
+    paths = []
+    for path in iterator:
+        if not path.is_file():
+            continue
+        relative_parts = path.relative_to(directory).parts
+        if ".ipynb_checkpoints" in relative_parts:
+            continue
+        if path.suffix.casefold() not in IMAGE_EXTENSIONS or _is_hidden(path, directory):
+            paths.append(path)
+    return sorted(paths, key=lambda value: (value.as_posix().casefold(), value.as_posix()))
+
+
 def _unique_map(
     paths: Iterable[Path],
     key_fn,
@@ -416,6 +439,9 @@ def prepare_aio3_manifests(
     rain100_targets = find_images(data_root / "Rain100L" / "gt")
     ots_clear = find_images(data_root / "OTS" / "clear")
     ots_haze = find_images(data_root / "OTS" / "haze", recursive=True)
+    ots_haze_excluded_files = find_excluded_files(
+        data_root / "OTS" / "haze", recursive=True
+    )
     ots_depth = find_images(data_root / "OTS" / "depth")
     sots_inputs = find_images(data_root / "SOTS" / "outdoor" / "input")
     sots_targets = find_images(data_root / "SOTS" / "outdoor" / "target")
@@ -435,6 +461,7 @@ def prepare_aio3_manifests(
         "Rain100L/gt": len(rain100_targets),
         "OTS/clear": len(ots_clear),
         "OTS/haze": len(ots_haze),
+        "OTS/haze_files_excluded": len(ots_haze_excluded_files),
         "OTS/depth_ignored": len(ots_depth),
         "SOTS/outdoor/input": len(sots_inputs),
         "SOTS/outdoor/target": len(sots_targets),
@@ -471,6 +498,12 @@ def prepare_aio3_manifests(
     )
     _expect_count(errors, "OTS/clear", len(ots_clear), expectations.ots_clear_images)
     _expect_count(errors, "OTS/haze", len(ots_haze), expectations.ots_haze_images)
+    _expect_count(
+        errors,
+        "OTS/haze excluded files",
+        len(ots_haze_excluded_files),
+        expectations.ots_haze_excluded_files,
+    )
     _expect_count(
         errors,
         "SOTS/outdoor/input",
@@ -653,7 +686,7 @@ def prepare_aio3_manifests(
                 input_path=input_path,
                 target=target_path,
                 metadata={
-                    "dataset": f"SOTS-outdoor-local-{len(sots_pairs)}",
+                    "dataset": "SOTS-outdoor",
                     "clear_scene_id": scene_id,
                 },
             )
@@ -706,9 +739,9 @@ def prepare_aio3_manifests(
     warnings = [
         "WED/noisy is counted but intentionally excluded; AIO3-v1 synthesizes Gaussian noise.",
         (
-            "SOTS Outdoor is an incomplete local subset: "
-            f"{len(sots_inputs)} inputs, {len(sots_targets)} targets, "
-            f"{len(sots_pairs)} strict pairs. Report it as SOTS-outdoor-local-{len(sots_pairs)}."
+            "SOTS Outdoor contains "
+            f"{len(sots_inputs)} degraded inputs mapped to {len(sots_targets)} unique "
+            f"target files; all {len(sots_pairs)} inputs form strict evaluation pairs."
         ),
     ]
     audit: Dict[str, object] = {
@@ -726,6 +759,9 @@ def prepare_aio3_manifests(
             "OTS_clear_scenes": len(ots_variants),
             "OTS_haze_variants_per_scene_min": min(ots_variants.values()),
             "OTS_haze_variants_per_scene_max": max(ots_variants.values()),
+            "OTS_files_excluded": [
+                str(path) for path in ots_haze_excluded_files
+            ],
             "SOTS_pairs": len(sots_pairs),
             "SOTS_inputs_without_target": sots_missing_targets,
             "SOTS_targets_without_input": sots_missing_inputs,
