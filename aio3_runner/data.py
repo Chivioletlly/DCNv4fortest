@@ -434,12 +434,17 @@ def build_train_dataloader(
         num_batches=num_batches,
         seed=seed,
     )
+    loader_generator = torch.Generator(device="cpu")
+    loader_generator.manual_seed(
+        deterministic_seed(f"{AIO3_PROTOCOL_VERSION}:train-loader:{seed}")
+    )
     loader_options = {
         "dataset": dataset,
         "batch_sampler": batch_sampler,
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "persistent_workers": num_workers > 0,
+        "generator": loader_generator,
     }
     if num_workers > 0:
         loader_options["prefetch_factor"] = 2
@@ -463,6 +468,10 @@ def build_eval_dataloader(
         patch_size=None,
         validate_paths=validate_paths,
     )
+    loader_generator = torch.Generator(device="cpu")
+    loader_generator.manual_seed(
+        deterministic_seed(f"{AIO3_PROTOCOL_VERSION}:{split}-loader")
+    )
     loader = DataLoader(
         dataset,
         batch_size=1,
@@ -470,5 +479,6 @@ def build_eval_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
+        generator=loader_generator,
     )
     return loader, dataset
