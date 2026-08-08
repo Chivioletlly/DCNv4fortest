@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
@@ -67,6 +68,17 @@ def restore_rng_state(state: Mapping[str, object]) -> None:
                 "Checkpoint contains NumPy RNG state but NumPy is unavailable"
             ) from error
         np.random.set_state(numpy_state)
+
+
+@contextmanager
+def preserve_rng_state():
+    """Prevent monitoring or serialization helpers from perturbing training RNG."""
+
+    state = capture_rng_state()
+    try:
+        yield
+    finally:
+        restore_rng_state(state)
 
 
 def build_checkpoint(

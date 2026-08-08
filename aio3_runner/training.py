@@ -22,10 +22,12 @@ from .checkpoint import (
 )
 from .data import TASKS, build_eval_dataloader, build_train_dataloader
 from .models import build_dcnv4_unet, model_parameter_counts
+from .monitoring import WandbMonitor
 from .runtime import (
     append_jsonl,
     atomic_write_json,
     git_state,
+    load_fixed_visual_sample_ids,
     verify_manifest_bundle,
 )
 from .schedule import WarmupCosineScheduler
@@ -299,10 +301,12 @@ def run_training(
     validation_interval = int(config["validation"]["interval_steps"])
     checkpoint_interval = int(config["checkpoint"]["interval_steps"])
     milestone_interval = int(config["checkpoint"]["milestone_interval_steps"])
+    media_interval = int(config["monitoring"]["media_interval_steps"])
     grad_clip_norm = float(config["training"]["grad_clip_norm"])
     train_log_path = run_dir / "train_metrics.jsonl"
     checkpoints_dir = run_dir / "checkpoints"
     metric_window = TrainingMetricWindow()
+    fixed_visual_sample_ids = load_fixed_visual_sample_ids(manifest_dir)
     _update_run_state(
         run_dir,
         status="running",
@@ -311,8 +315,14 @@ def run_training(
     )
     model.train()
     safe_to_checkpoint = True
+    monitor: Optional[WandbMonitor] = None
 
     try:
+        monitor = WandbMonitor(
+            config=config,
+            run_dir=run_dir,
+            resume=resume_checkpoint is not None,
+        )
         for batch in train_loader:
             safe_to_checkpoint = False
             if device.type == "cuda":
@@ -359,6 +369,7 @@ def run_training(
             if global_step % scalar_interval == 0 or global_step == max_steps:
                 metrics = metric_window.finish(global_step=global_step, device=device)
                 append_jsonl(train_log_path, metrics)
+                monitor.log_scalars(metrics)
                 print(
                     f"step={global_step}/{max_steps} "
                     f"loss={metrics['train/loss']:.6f} "
@@ -370,11 +381,20 @@ def run_training(
 
             validation_improved = False
             if global_step % validation_interval == 0 or global_step == max_steps:
+                capture_media = global_step % media_interval == 0
                 result = evaluate_model(
                     model,
                     validation_loader,
                     device=device,
                     global_step=global_step,
+                    visual_sample_ids=(
+                        fixed_visual_sample_ids if capture_media else None
+                    ),
+                    visual_dir=(
+                        run_dir / "validation" / "media" / f"step_{global_step:06d}"
+                        if capture_media
+                        else None
+                    ),
                 )
                 write_validation_result(result, run_dir / "validation")
                 validation_log = {"global_step": global_step}
@@ -382,6 +402,12 @@ def run_training(
                     {f"val/{key}": value for key, value in result.summary.items()}
                 )
                 append_jsonl(run_dir / "validation_metrics.jsonl", validation_log)
+                monitor.log_validation(
+                    global_step=global_step,
+                    summary=result.summary,
+                    visuals=result.visuals,
+                    residual_histogram=result.residual_histogram,
+                )
                 macro_psnr = float(result.summary["macro/psnr"])
                 previous_best = best_metrics.get("macro_psnr")
                 if previous_best is None or macro_psnr > float(previous_best):
@@ -391,6 +417,7 @@ def run_training(
                         "global_step": global_step,
                     }
                     validation_improved = True
+                    monitor.update_best_summary(best_metrics)
                 print(
                     f"validation step={global_step} "
                     f"macro_psnr={result.summary['macro/psnr']:.4f} "
@@ -441,6 +468,9 @@ def run_training(
                     global_step=global_step,
                     best_metrics=best_metrics,
                 )
+        best_checkpoint_path = checkpoints_dir / "best_macro_psnr.pth"
+        if best_checkpoint_path.is_file() and best_metrics.get("macro_psnr") is not None:
+            monitor.log_best_checkpoint(best_checkpoint_path, best_metrics)
     except KeyboardInterrupt:
         if safe_to_checkpoint and global_step > 0:
             _save_training_checkpoint(
@@ -469,3 +499,6 @@ def run_training(
             message=f"{type(error).__name__}: {error}",
         )
         raise
+    finally:
+        if monitor is not None:
+            monitor.finish()

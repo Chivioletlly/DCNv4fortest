@@ -43,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name")
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default="online",
+        help="Use offline when the server cannot reach W&B; disabled is for diagnostics only.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        help="Optional W&B account/team; when omitted the SDK default is resolved and recorded.",
+    )
     return parser
 
 
@@ -72,6 +82,8 @@ def _resolve_run(args) -> tuple:
         run_kind=args.run_kind,
         seed=args.seed,
         num_workers=args.num_workers,
+        wandb_mode=args.wandb_mode,
+        wandb_entity=args.wandb_entity,
         run_name=args.run_name,
     )
     return run_dir, config, resume_checkpoint

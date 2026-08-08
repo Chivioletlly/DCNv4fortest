@@ -16,4 +16,5 @@ results/
 test_images/
 tensorboard/
 .tmp_aio3_manifest_tests/
+.tmp_aio3_*_tests/
 train_notebook.ipynb

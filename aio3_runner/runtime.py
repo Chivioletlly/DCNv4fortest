@@ -24,6 +24,7 @@ from .protocol import AIO3_PROTOCOL_VERSION
 
 
 MODEL_NAME = "dcnv4_unet"
+WANDB_VERSION = "0.25.1"
 MANIFEST_FILES = ("train.jsonl", "val.jsonl", "test.jsonl")
 AUXILIARY_DATA_FILES = ("data_audit.json", "visual_samples.json")
 RUN_PROFILES: Mapping[str, Mapping[str, int]] = {
@@ -147,6 +148,36 @@ def verify_manifest_bundle(manifest_dir: Path) -> Dict[str, object]:
     return {"directory": str(manifest_dir), "hashes": hashes, "audit": audit}
 
 
+def load_fixed_visual_sample_ids(manifest_dir: Path) -> Tuple[str, ...]:
+    path = Path(manifest_dir) / "visual_samples.json"
+    with path.open("r", encoding="utf-8") as stream:
+        selection = json.load(stream)
+    if selection.get("protocol") != AIO3_PROTOCOL_VERSION:
+        raise RuntimeError(f"Invalid visual sample protocol: {selection.get('protocol')!r}")
+    samples = selection.get("samples", {})
+    expected_counts = {
+        "denoise_sigma15": 2,
+        "denoise_sigma25": 2,
+        "denoise_sigma50": 2,
+        "derain": 4,
+        "dehaze": 4,
+    }
+    unexpected = sorted(set(samples) - set(expected_counts))
+    if unexpected:
+        raise RuntimeError(f"Unexpected fixed visual sample groups: {unexpected}")
+    ordered = []
+    for group, expected_count in expected_counts.items():
+        values = samples.get(group)
+        if not isinstance(values, list) or len(values) != expected_count:
+            raise RuntimeError(
+                f"Fixed visual group {group} requires {expected_count} IDs, got {values!r}"
+            )
+        ordered.extend(str(value) for value in values)
+    if len(set(ordered)) != len(ordered):
+        raise RuntimeError("Fixed visual sample IDs must be unique")
+    return tuple(ordered)
+
+
 def _copy_manifest_bundle(source_dir: Path, destination_dir: Path) -> Dict[str, str]:
     destination_dir.mkdir(parents=True, exist_ok=False)
     for filename in (*MANIFEST_FILES, *AUXILIARY_DATA_FILES):
@@ -165,6 +196,8 @@ def build_run_config(
     repository_state: Mapping[str, object],
     num_workers: int,
     wandb_run_id: str,
+    wandb_mode: str,
+    wandb_entity: Optional[str],
 ) -> Dict[str, object]:
     if run_kind not in RUN_PROFILES:
         raise ValueError(f"run_kind must be one of {tuple(RUN_PROFILES)}, got {run_kind!r}")
@@ -192,6 +225,7 @@ def build_run_config(
             "samples_per_task": {"denoise": 4, "derain": 4, "dehaze": 4},
             "num_workers": int(num_workers),
             "pin_memory": True,
+            "multiprocessing_context": "spawn",
             "manifest_sha256": dict(manifest_hashes),
         },
         "training": {
@@ -222,11 +256,17 @@ def build_run_config(
             "milestone_interval_steps": 50000,
         },
         "monitoring": {
+            "provider": "wandb",
+            "version": WANDB_VERSION,
+            "mode": wandb_mode,
+            "entity": wandb_entity,
             "project": "aio3-restoration",
             "group": AIO3_PROTOCOL_VERSION,
             "scalar_interval_steps": profile["scalar_interval_steps"],
             "media_interval_steps": profile["media_interval_steps"],
             "wandb_run_id": wandb_run_id,
+            "upload_manifest_artifact": True,
+            "upload_best_checkpoint_artifact": True,
         },
         "source": {
             "repository_commit": repository_state["commit"],
@@ -236,8 +276,12 @@ def build_run_config(
             ],
         },
         "paths": {
+            "output_root": str(run_dir.parents[1]),
             "run_dir": str(run_dir),
             "manifest_dir": str(run_dir / "manifests"),
+            "protocol_document": str(
+                run_dir / "AIO3_TRAINING_EVALUATION_PROTOCOL.md"
+            ),
         },
     }
 
@@ -258,9 +302,16 @@ def environment_info(repository_state: Mapping[str, object]) -> Dict[str, object
         dcnv4_location = str(Path(DCNv4.__file__).resolve())
     except Exception as error:  # The environment report must preserve the import failure.
         dcnv4_location = f"IMPORT_ERROR: {type(error).__name__}: {error}"
+    try:
+        import wandb
+
+        wandb_version: Optional[str] = wandb.__version__
+    except ImportError:
+        wandb_version = None
     return {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "hostname": socket.gethostname(),
+        "command": list(sys.argv),
         "platform": platform.platform(),
         "python": sys.version,
         "torch": torch.__version__,
@@ -271,6 +322,7 @@ def environment_info(repository_state: Mapping[str, object]) -> Dict[str, object
         "cuda_available": torch.cuda.is_available(),
         "cuda_device": cuda_device,
         "dcnv4_location": dcnv4_location,
+        "wandb": wandb_version,
         "repository": dict(repository_state),
     }
 
@@ -283,9 +335,26 @@ def prepare_new_run(
     run_kind: str,
     seed: int,
     num_workers: int,
+    wandb_mode: str,
+    wandb_entity: Optional[str],
     run_name: Optional[str] = None,
 ) -> Tuple[Path, Dict[str, object]]:
     repository_state = git_state(repository_root)
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        raise ValueError(f"Unsupported W&B mode: {wandb_mode!r}")
+    if run_kind == "formal" and wandb_mode == "disabled":
+        raise ValueError("Formal AIO3-v1 training requires W&B online or offline mode")
+    if wandb_mode != "disabled":
+        try:
+            import wandb
+        except ImportError as error:
+            raise RuntimeError(
+                "W&B is enabled but the wandb SDK is not installed in this environment"
+            ) from error
+        if wandb.__version__ != WANDB_VERSION:
+            raise RuntimeError(
+                f"AIO3-v1 requires wandb=={WANDB_VERSION}, got {wandb.__version__}"
+            )
     if repository_state["dirty"]:
         raise RuntimeError(
             "Refusing to start a frozen AIO3 run from a dirty worktree:\n"
@@ -307,6 +376,10 @@ def prepare_new_run(
     run_dir.mkdir(parents=True)
     for directory in ("checkpoints", "logs", "validation", "test", "wandb"):
         (run_dir / directory).mkdir()
+    shutil.copy2(
+        protocol_document,
+        run_dir / "AIO3_TRAINING_EVALUATION_PROTOCOL.md",
+    )
 
     copied_hashes = _copy_manifest_bundle(
         Path(str(verified_source["directory"])),
@@ -322,6 +395,8 @@ def prepare_new_run(
         repository_state=repository_state,
         num_workers=num_workers,
         wandb_run_id=wandb_run_id,
+        wandb_mode=wandb_mode,
+        wandb_entity=wandb_entity,
     )
     atomic_write_json(run_dir / "config.yaml", config)
     atomic_write_json(run_dir / "environment.json", environment_info(repository_state))

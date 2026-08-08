@@ -1,5 +1,8 @@
 import math
+import shutil
 import sys
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -10,6 +13,22 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from aio3_runner.training import TrainingMetricWindow
 from aio3_runner.validation import evaluate_model
+
+
+@contextmanager
+def _workspace_temporary_directory():
+    parent = REPOSITORY_ROOT / ".tmp_aio3_training_core_tests"
+    parent.mkdir(exist_ok=True)
+    path = parent / uuid.uuid4().hex
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
 
 
 def test_training_window_tracks_balanced_tasks_and_raw_prediction_range():
@@ -80,12 +99,28 @@ def test_native_validation_runs_all_required_metric_groups_and_restores_mode():
         _validation_batch("rain", "derain", -1),
         _validation_batch("haze", "dehaze", -1),
     ]
-    result = evaluate_model(
-        model,
-        dataloader,
-        device=torch.device("cpu"),
-        global_step=100,
-    )
+    visual_ids = [batch["sample_id"][0] for batch in dataloader]
+    with _workspace_temporary_directory() as root:
+        result = evaluate_model(
+            model,
+            dataloader,
+            device=torch.device("cpu"),
+            global_step=100,
+            visual_sample_ids=visual_ids,
+            visual_dir=root / "media",
+        )
+
+        assert len(result.visuals) == 5
+        assert result.residual_histogram
+        for visual in result.visuals:
+            for key in (
+                "input_path",
+                "prediction_path",
+                "target_path",
+                "absolute_error_path",
+                "signed_residual_path",
+            ):
+                assert Path(visual[key]).is_file()
 
     assert model.training
     assert result.global_step == 100

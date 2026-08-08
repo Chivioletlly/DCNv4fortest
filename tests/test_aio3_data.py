@@ -1,3 +1,4 @@
+import gc
 import json
 import shutil
 import sys
@@ -302,6 +303,29 @@ def test_dataloader_builders_collate_balanced_train_and_native_eval_batches():
         eval_batch = next(iter(eval_loader))
         assert eval_batch["degraded"].shape == (1, 3, 9, 13)
         assert eval_batch["target"].shape == (1, 3, 9, 13)
+
+
+def test_spawn_worker_context_loads_a_balanced_batch_without_forking():
+    with _workspace_temporary_directory() as root:
+        train_manifest = _build_train_manifest(root)
+        train_loader, _, _ = build_train_dataloader(
+            train_manifest,
+            patch_size=8,
+            start_step=0,
+            num_batches=1,
+            seed=3407,
+            num_workers=1,
+        )
+        iterator = iter(train_loader)
+        batch = next(iterator)
+        assert Counter(batch["task"]) == {
+            "denoise": 4,
+            "derain": 4,
+            "dehaze": 4,
+        }
+        del iterator
+        del train_loader
+        gc.collect()
 
 
 if __name__ == "__main__":

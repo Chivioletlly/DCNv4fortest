@@ -448,6 +448,7 @@ def build_train_dataloader(
     }
     if num_workers > 0:
         loader_options["prefetch_factor"] = 2
+        loader_options["multiprocessing_context"] = "spawn"
     loader = DataLoader(**loader_options)
     return loader, dataset, batch_sampler
 
@@ -472,13 +473,16 @@ def build_eval_dataloader(
     loader_generator.manual_seed(
         deterministic_seed(f"{AIO3_PROTOCOL_VERSION}:{split}-loader")
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
-        generator=loader_generator,
-    )
+    loader_options = {
+        "dataset": dataset,
+        "batch_size": 1,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": num_workers > 0,
+        "generator": loader_generator,
+    }
+    if num_workers > 0:
+        loader_options["multiprocessing_context"] = "spawn"
+    loader = DataLoader(**loader_options)
     return loader, dataset

@@ -506,9 +506,11 @@ W&B 用于远程实时监控、跨 run 对比和定性可视化，但不是唯�
 
 ### 14.2 安装、登录与本地目录
 
-W&B SDK 必须安装在 `general-decomp` 训练环境中，并将实际版本写入 lock 文件、
-`environment.json` 和 W&B config。SDK 版本变化通常不改变训练数学协议，但必须记录，
-便于排查日志行为变化。
+W&B SDK 必须安装在 `general-decomp` 训练环境中，并将实际版本写入环境规格文件、
+`environment.json` 和 W&B config。服务器使用 Python 3.9，因此 `environment.yml` 固定
+`wandb==0.25.1`；当前 W&B 0.28.x 已要求 Python 3.10 或更高，不能直接用于该环境。
+SDK 版本变化通常不改变训练数学协议，但必须记录，便于排查日志行为变化。版本兼容信息
+以 [W&B 0.25.1 PyPI 元数据](https://pypi.org/project/wandb/0.25.1/) 为准。
 
 API key 只通过以下方式之一提供：
 
@@ -517,8 +519,23 @@ wandb login
 # 或在任务调度器/安全环境中设置 WANDB_API_KEY
 ```
 
+安装与连通性检查命令固定为：
+
+```bash
+python -m pip install 'wandb==0.25.1'
+python -c "import wandb; print(wandb.__version__)"
+
+python -m aio3_runner.wandb_check \
+  --output-root /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/outputs/AIO3/aio3-v1
+```
+
+若账号默认 entity 不正确，显式增加 `--entity <account-or-team>`。只有 online 连通性测试
+成功且网页可见后，才启动 online smoke run；网络不可用时使用 `--mode offline` 验证本地
+写入，并在正式命令中固定 `--wandb-mode offline`。
+
 禁止把真实 API key 写入源码、shell 脚本、YAML、checkpoint、日志或 Git。运行前由 runner
-创建 `${RUN_DIR}/wandb`，然后设置：
+创建 `${RUN_DIR}/wandb`，并把 W&B run、cache 和 staging 路径设置到输出盘；以下环境变量
+形式可用于人工复核或覆盖调度环境：
 
 ```bash
 export WANDB_PROJECT=aio3-restoration
@@ -534,6 +551,26 @@ entity。`WANDB_DIR`、cache 和 staging 均位于输出盘，不能落到源码
 
 在 100-step smoke test 前先运行一个只记录单个标量的 W&B 连通性测试，并在网页确认
 run 可见。正式训练使用 `WANDB_MODE=online` 才能远程实时监控。
+
+100-step DCNv4 smoke run 的统一入口为：
+
+```bash
+python -m aio3_runner.train \
+  --manifest-dir /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/outputs/AIO3/aio3-v1/manifests \
+  --output-root /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/outputs/AIO3/aio3-v1 \
+  --run-kind smoke \
+  --seed 3407 \
+  --num-workers 8 \
+  --wandb-mode online
+```
+
+如需指定账号或团队，增加 `--wandb-entity <account-or-team>`。恢复命令只接受同一运行的
+`checkpoints/latest.pth`，W&B mode、entity、run ID 和全部训练配置均从 checkpoint 与
+`config.yaml` 读取：
+
+```bash
+python -m aio3_runner.train --resume "${RUN_DIR}/checkpoints/latest.pth"
+```
 
 ### 14.3 Run 组织方式
 
@@ -803,11 +840,18 @@ contents:
 服务器访问 GitHub 曾出现超时，因此必须预期 W&B 网络也可能不稳定：
 
 1. 在线模式初始化失败时，在任何 optimizer step 开始前退出并给出明确错误；
-2. 用户确认后才用 `WANDB_MODE=offline` 重新启动同一实验；
+2. 用户确认后才用 `--wandb-mode offline` 创建新的 run 目录；失败的 online 初始化目录
+   不得改写 config 后复用；
 3. offline run 仍写入 `${RUN_DIR}/wandb`，并保存相同的 run ID；
 4. 网络恢复后同步具体 run 目录，而不是扫描并误传其他实验；
 5. 在线训练中单次日志通信异常不能中断梯度更新，本地 JSONL 继续写入并在控制台告警；
 6. 训练结束时在 `finally` 中调用 `run.finish()`，同时保证 checkpoint 先落盘。
+
+当前 W&B SDK 在上传发生不可恢复错误后仍允许本地继续记录；runner 额外将每次 W&B API
+异常写入 `logs/wandb_errors.jsonl`，所有 W&B 调用前后恢复 Python、NumPy、PyTorch CPU
+和 CUDA RNG 状态。W&B 的 online/offline 与 resume 语义以官方
+[init API](https://docs.wandb.ai/models/ref/python/functions/init) 和
+[resume 指南](https://docs.wandb.ai/models/runs/resuming) 为准。
 
 同步命令形式为：
 
@@ -868,14 +912,18 @@ Artifact、环境变量和 offline sync 均来自 W&B 官方文档：
 ${OUTPUT_ROOT}/dcnv4_unet/<run_name>/
 ├── config.yaml
 ├── environment.json
-├── data_audit.json
+├── AIO3_TRAINING_EVALUATION_PROTOCOL.md
 ├── wandb_run_id.txt
+├── wandb_state.json
 ├── run_state.json
 ├── train_metrics.jsonl
+├── validation_metrics.jsonl
 ├── manifests/
 │   ├── train.jsonl
 │   ├── val.jsonl
-│   └── test.jsonl
+│   ├── test.jsonl
+│   ├── visual_samples.json
+│   └── data_audit.json
 ├── checkpoints/
 ├── logs/
 ├── wandb/
