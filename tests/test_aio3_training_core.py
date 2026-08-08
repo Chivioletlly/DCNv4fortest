@@ -11,7 +11,7 @@ import torch
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from aio3_runner.training import TrainingMetricWindow
+from aio3_runner.training import TrainingMetricWindow, resolve_training_target_step
 from aio3_runner.validation import evaluate_model
 
 
@@ -135,10 +135,51 @@ def test_native_validation_runs_all_required_metric_groups_and_restores_mode():
     assert math.isfinite(result.summary["macro/ssim"])
 
 
+def test_safe_pause_target_is_strict_and_scalar_aligned():
+    assert (
+        resolve_training_target_step(
+            global_step=0,
+            max_steps=100,
+            scalar_interval=10,
+            pause_at_step=None,
+        )
+        == 100
+    )
+    assert (
+        resolve_training_target_step(
+            global_step=0,
+            max_steps=100,
+            scalar_interval=10,
+            pause_at_step=50,
+        )
+        == 50
+    )
+
+    invalid_cases = (
+        {"global_step": 50, "pause_at_step": 50},
+        {"global_step": 50, "pause_at_step": 40},
+        {"global_step": 0, "pause_at_step": 100},
+        {"global_step": 0, "pause_at_step": 55},
+    )
+    for case in invalid_cases:
+        try:
+            resolve_training_target_step(
+                global_step=case["global_step"],
+                max_steps=100,
+                scalar_interval=10,
+                pause_at_step=case["pause_at_step"],
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Invalid safe-pause request was accepted: {case}")
+
+
 if __name__ == "__main__":
     tests = [
         test_training_window_tracks_balanced_tasks_and_raw_prediction_range,
         test_native_validation_runs_all_required_metric_groups_and_restores_mode,
+        test_safe_pause_target_is_strict_and_scalar_aligned,
     ]
     for test in tests:
         test()

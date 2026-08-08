@@ -194,12 +194,44 @@ def _save_training_checkpoint(
     atomic_torch_save(checkpoint, path)
 
 
+def resolve_training_target_step(
+    *,
+    global_step: int,
+    max_steps: int,
+    scalar_interval: int,
+    pause_at_step: Optional[int],
+) -> int:
+    """Resolve a clean execution boundary without changing the frozen config."""
+
+    if pause_at_step is None:
+        return max_steps
+    pause_at_step = int(pause_at_step)
+    if pause_at_step <= global_step:
+        raise ValueError(
+            "--pause-at-step must be greater than the checkpoint global_step: "
+            f"{pause_at_step} <= {global_step}"
+        )
+    if pause_at_step >= max_steps:
+        raise ValueError(
+            "--pause-at-step must be smaller than the configured max_steps: "
+            f"{pause_at_step} >= {max_steps}"
+        )
+    if pause_at_step % scalar_interval != 0:
+        raise ValueError(
+            "--pause-at-step must align with the scalar logging interval so no "
+            f"partial metric window is discarded: {pause_at_step} % "
+            f"{scalar_interval} != 0"
+        )
+    return pause_at_step
+
+
 def run_training(
     *,
     repository_root: Path,
     run_dir: Path,
     config: Mapping[str, object],
     resume_checkpoint: Optional[Path] = None,
+    pause_at_step: Optional[int] = None,
 ) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("AIO3 DCNv4 training requires a CUDA GPU")
@@ -275,7 +307,14 @@ def run_training(
     max_steps = int(config["training"]["max_steps"])
     if global_step >= max_steps:
         raise RuntimeError(f"Run is already complete at global_step={global_step}")
-    remaining_steps = max_steps - global_step
+    scalar_interval = int(config["monitoring"]["scalar_interval_steps"])
+    target_step = resolve_training_target_step(
+        global_step=global_step,
+        max_steps=max_steps,
+        scalar_interval=scalar_interval,
+        pause_at_step=pause_at_step,
+    )
+    remaining_steps = target_step - global_step
     workers = int(config["data"]["num_workers"])
     train_loader, _, sampler = build_train_dataloader(
         manifest_dir / "train.jsonl",
@@ -297,7 +336,6 @@ def run_training(
         validate_paths=False,
     )
 
-    scalar_interval = int(config["monitoring"]["scalar_interval_steps"])
     validation_interval = int(config["validation"]["interval_steps"])
     checkpoint_interval = int(config["checkpoint"]["interval_steps"])
     milestone_interval = int(config["checkpoint"]["milestone_interval_steps"])
@@ -468,8 +506,44 @@ def run_training(
                     global_step=global_step,
                     best_metrics=best_metrics,
                 )
+        if pause_at_step is not None:
+            if global_step != target_step:
+                raise RuntimeError(
+                    "Training loader ended before the requested safe pause: "
+                    f"{global_step} != {target_step}"
+                )
+            latest_path = checkpoints_dir / "latest.pth"
+            _save_training_checkpoint(
+                path=latest_path,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                global_step=global_step,
+                best_metrics=best_metrics,
+                config=config,
+            )
+            loaded_latest = load_checkpoint(latest_path)
+            if int(loaded_latest["global_step"]) != global_step:
+                raise RuntimeError("Safe-pause checkpoint round-trip changed global_step")
+            _update_run_state(
+                run_dir,
+                status="paused",
+                global_step=global_step,
+                best_metrics=best_metrics,
+                message="Requested safe pause at optimizer-step boundary",
+            )
+            print(
+                f"safe pause completed at step={global_step}; "
+                f"resume from {latest_path}",
+                flush=True,
+            )
+
         best_checkpoint_path = checkpoints_dir / "best_macro_psnr.pth"
-        if best_checkpoint_path.is_file() and best_metrics.get("macro_psnr") is not None:
+        if (
+            global_step == max_steps
+            and best_checkpoint_path.is_file()
+            and best_metrics.get("macro_psnr") is not None
+        ):
             monitor.log_best_checkpoint(best_checkpoint_path, best_metrics)
     except KeyboardInterrupt:
         if safe_to_checkpoint and global_step > 0:

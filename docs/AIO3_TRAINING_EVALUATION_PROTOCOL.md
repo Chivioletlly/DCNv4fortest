@@ -572,6 +572,32 @@ python -m aio3_runner.train \
 python -m aio3_runner.train --resume "${RUN_DIR}/checkpoints/latest.pth"
 ```
 
+在进入 5000-step pilot 前，另建一个 100-step smoke run 做一次真实恢复验收。首次启动增加
+`--pause-at-step 50`；runner 会在第 50 次 optimizer 更新及标量落盘完成后，原子保存
+`latest.pth`，把 `run_state.json` 标记为 `paused`，随后正常关闭同一个 W&B run：
+
+```bash
+python -m aio3_runner.train \
+  --manifest-dir /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/outputs/AIO3/aio3-v1/manifests \
+  --output-root /home/bml/storage/mnt/v-zz4uoucip21b66el/PRP/Unet4Degradation/outputs/AIO3/aio3-v1 \
+  --run-kind smoke \
+  --seed 3407 \
+  --num-workers 8 \
+  --wandb-mode online \
+  --wandb-entity c14150591-sjtu \
+  --pause-at-step 50
+```
+
+记录控制台输出的 `RUN_DIR`，确认状态和 checkpoint 都停在 50，再执行上述 `--resume`
+命令跑至 100。`--pause-at-step` 是执行控制而非实验超参数，不写入冻结 config；暂停点
+必须小于 `max_steps`，并与标量记录间隔对齐，从而避免丢弃半个聚合窗口。恢复后必须确认：
+
+1. `run_state.json` 从 `paused/50` 变为 `completed/100`；
+2. `latest.pth` 的 `global_step` 与 scheduler `completed_steps` 均为 100；
+3. `wandb_run_id.txt`、checkpoint 和恢复前后的 W&B URL 使用同一个 run ID；
+4. W&B 历史的训练步为连续的 10、20、...、100，且只存在一个 run；
+5. 第 100 step 的完整验证、14 行固定样本 Table 和最佳模型 Artifact 均存在。
+
 ### 14.3 Run 组织方式
 
 W&B 固定组织方式：

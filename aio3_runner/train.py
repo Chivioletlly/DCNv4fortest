@@ -44,6 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument(
+        "--pause-at-step",
+        type=int,
+        help=(
+            "Stop cleanly after this optimizer step, atomically save latest.pth, "
+            "and mark the run paused. This execution-only control is intended for "
+            "resume acceptance tests."
+        ),
+    )
+    parser.add_argument(
         "--wandb-mode",
         choices=("online", "offline", "disabled"),
         default="online",
@@ -106,6 +115,7 @@ def main() -> None:
         run_dir=run_dir,
         config=config,
         resume_checkpoint=resume_checkpoint,
+        pause_at_step=args.pause_at_step,
     )
 
 
