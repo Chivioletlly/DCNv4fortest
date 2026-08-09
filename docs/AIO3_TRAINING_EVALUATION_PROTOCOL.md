@@ -679,6 +679,12 @@ run.define_metric("val/macro/psnr", step_metric="global_step", summary="max")
 run.define_metric("val/macro/ssim", step_metric="global_step", summary="max")
 ```
 
+`wandb==0.25.1` 的单星号 namespace 定义不能可靠覆盖更深层的指标路径。因此 runner
+还必须逐一对 `val/denoise/sigma*/{psnr,ssim,images}`、各任务验证指标、分任务残差诊断
+以及 `test/*` 下的多层指标调用精确的 `define_metric(...,
+step_metric="global_step")`。W&B 图表横轴显示为 `Step` 说明绑定失败，正式训练前必须修复；
+正确横轴应显示为 `global_step`。
+
 每一次 `run.log()` 都必须在同一个字典中包含当前 `global_step`。不得同时依赖 W&B
 内部 step 或把 dataloader batch index 当作训练 step。最佳指标还要显式写入：
 

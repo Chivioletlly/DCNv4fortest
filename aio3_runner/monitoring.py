@@ -162,6 +162,53 @@ class WandbMonitor:
             "test/*",
         ):
             self.run.define_metric(namespace, step_metric="global_step")
+
+        # W&B 0.25.1 does not reliably apply a one-star namespace definition
+        # to metric names below another slash.  Define every nested scalar and
+        # media key exactly so charts never fall back to W&B's internal Step.
+        nested_metrics = [
+            "diagnostics/denoise/residual_negative_fraction",
+            "diagnostics/derain/residual_negative_fraction",
+            "diagnostics/dehaze/residual_negative_fraction",
+            "val/denoise/mean/psnr",
+            "val/denoise/mean/ssim",
+            "val/denoise/raw_l1",
+            "val/denoise/residual_negative_fraction",
+            "val/derain/psnr",
+            "val/derain/ssim",
+            "val/derain/images",
+            "val/derain/raw_l1",
+            "val/derain/residual_negative_fraction",
+            "val/dehaze/psnr",
+            "val/dehaze/ssim",
+            "val/dehaze/images",
+            "val/dehaze/raw_l1",
+            "val/dehaze/residual_negative_fraction",
+            "test/bsd68/mean/psnr",
+            "test/bsd68/mean/ssim",
+            "test/rain100l/psnr",
+            "test/rain100l/ssim",
+            "test/rain100l/images",
+            "test/sots_outdoor/psnr",
+            "test/sots_outdoor/ssim",
+            "test/sots_outdoor/images",
+            "test/macro/psnr",
+            "test/macro/ssim",
+            "test/per_image_metrics",
+            "test/fixed_gallery",
+        ]
+        for sigma in (15, 25, 50):
+            nested_metrics.extend(
+                f"val/denoise/sigma{sigma}/{metric}"
+                for metric in ("psnr", "ssim", "images")
+            )
+            nested_metrics.extend(
+                f"test/bsd68/sigma{sigma}/{metric}"
+                for metric in ("psnr", "ssim", "images")
+            )
+        for metric in nested_metrics:
+            self.run.define_metric(metric, step_metric="global_step")
+
         self.run.define_metric(
             "val/macro/psnr",
             step_metric="global_step",

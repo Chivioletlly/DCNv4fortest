@@ -59,11 +59,13 @@ class _FakeRun:
         self.summary = {}
         self.logs = []
         self.artifacts = []
+        self.metric_definitions = []
         self.finished = False
 
     def define_metric(self, *args, **kwargs):
         random.random()
         torch.rand(1)
+        self.metric_definitions.append((args, kwargs))
 
     def log(self, value):
         random.random()
@@ -185,6 +187,27 @@ def test_wandb_monitor_preserves_rng_and_logs_frozen_axes_and_artifacts():
         assert random.random() == expected_python
         assert fake_wandb.init_kwargs["resume"] == "never"
         assert fake_wandb.init_kwargs["id"] == "monitor-unit-id"
+        definitions = {
+            args[0]: kwargs for args, kwargs in fake_wandb.run.metric_definitions
+        }
+        for nested_metric in (
+            "diagnostics/denoise/residual_negative_fraction",
+            "val/denoise/sigma25/psnr",
+            "val/derain/ssim",
+            "val/dehaze/raw_l1",
+            "test/bsd68/sigma50/psnr",
+            "test/sots_outdoor/ssim",
+            "test/fixed_gallery",
+        ):
+            assert definitions[nested_metric]["step_metric"] == "global_step"
+        assert definitions["val/macro/psnr"] == {
+            "step_metric": "global_step",
+            "summary": "max",
+        }
+        assert definitions["val/macro/ssim"] == {
+            "step_metric": "global_step",
+            "summary": "max",
+        }
         assert all(log["global_step"] == 10 for log in fake_wandb.run.logs)
         assert "val/fixed_samples" in fake_wandb.run.logs[-1]
         assert fake_wandb.run.summary["best/global_step"] == 10
