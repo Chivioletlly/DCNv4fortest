@@ -46,9 +46,7 @@ class WandbMonitor:
 
         self.wandb = wandb
         if wandb.__version__ != WANDB_VERSION:
-            raise RuntimeError(
-                f"AIO3-v1 requires wandb=={WANDB_VERSION}, got {wandb.__version__}"
-            )
+            raise RuntimeError(f"AIO3-v1 requires wandb=={WANDB_VERSION}, got {wandb.__version__}")
         output_root = Path(str(config["paths"]["output_root"]))
         cache_dir = output_root / ".wandb_cache"
         data_dir = output_root / ".wandb_staging"
@@ -156,7 +154,13 @@ class WandbMonitor:
 
     def _define_metrics(self) -> None:
         self.run.define_metric("global_step")
-        for namespace in ("train/*", "diagnostics/*", "system/*", "val/*"):
+        for namespace in (
+            "train/*",
+            "diagnostics/*",
+            "system/*",
+            "val/*",
+            "test/*",
+        ):
             self.run.define_metric(namespace, step_metric="global_step")
         self.run.define_metric(
             "val/macro/psnr",
@@ -170,9 +174,7 @@ class WandbMonitor:
         )
 
     def _log_manifest_artifact(self) -> None:
-        with (self.run_dir / "manifests" / "data_audit.json").open(
-            "r", encoding="utf-8"
-        ) as stream:
+        with (self.run_dir / "manifests" / "data_audit.json").open("r", encoding="utf-8") as stream:
             audit = json.load(stream)
         artifact = self.wandb.Artifact(
             name="aio3-v1-manifests",
@@ -288,11 +290,7 @@ class WandbMonitor:
             )
             final_step = int(self.config["training"]["max_steps"])
             artifact.add_file(
-                str(
-                    self.run_dir
-                    / "validation"
-                    / f"metrics_step_{final_step:06d}.json"
-                ),
+                str(self.run_dir / "validation" / f"metrics_step_{final_step:06d}.json"),
                 name="final_validation_metrics.json",
             )
             self.run.log_artifact(
@@ -301,6 +299,102 @@ class WandbMonitor:
             )
 
         self._safe_call("best_checkpoint_artifact", log)
+
+    def log_test_evaluation(
+        self,
+        *,
+        global_step: int,
+        summary: Mapping[str, float],
+        per_image: Sequence[Mapping[str, object]],
+        visuals: Sequence[Mapping[str, object]],
+    ) -> None:
+        """Append frozen formal-test metrics to the resumed training run."""
+
+        def log() -> None:
+            payload = {"global_step": int(global_step)}
+            payload.update({f"test/{key}": value for key, value in summary.items()})
+            metric_columns = [
+                "dataset",
+                "task",
+                "sigma",
+                "sample_id",
+                "psnr",
+                "ssim",
+                "inference_time_seconds",
+            ]
+            metric_table = self.wandb.Table(columns=metric_columns)
+            for row in per_image:
+                metric_table.add_data(*(row[column] for column in metric_columns))
+            payload["test/per_image_metrics"] = metric_table
+
+            gallery_columns = [
+                "task",
+                "sigma",
+                "sample_id",
+                "input",
+                "prediction",
+                "target",
+                "absolute_error",
+                "signed_residual",
+                "psnr",
+                "ssim",
+                "residual_mean",
+                "residual_negative_fraction",
+            ]
+            gallery_table = self.wandb.Table(columns=gallery_columns)
+            for visual in visuals:
+                gallery_table.add_data(
+                    visual["task"],
+                    visual.get("sigma"),
+                    visual["sample_id"],
+                    self.wandb.Image(str(visual["input_path"])),
+                    self.wandb.Image(str(visual["prediction_path"])),
+                    self.wandb.Image(str(visual["target_path"])),
+                    self.wandb.Image(str(visual["absolute_error_path"])),
+                    self.wandb.Image(str(visual["signed_residual_path"])),
+                    visual["psnr"],
+                    visual["ssim"],
+                    visual["residual_mean"],
+                    visual["residual_negative_fraction"],
+                )
+            payload["test/fixed_gallery"] = gallery_table
+            self.run.log(payload)
+
+        self._safe_call("log_test_evaluation", log)
+
+    def log_evaluation_artifact(
+        self,
+        test_dir: Path,
+        *,
+        metadata: Mapping[str, object],
+    ) -> None:
+        """Upload numerical test outputs and the fixed gallery, never all predictions."""
+
+        def log() -> None:
+            artifact = self.wandb.Artifact(
+                name=f"aio3-v1-dcnv4-unet-seed{self.config['seed']}-evaluation",
+                type="evaluation",
+                metadata=dict(metadata),
+            )
+            test_dir_path = Path(test_dir)
+            for filename in (
+                "metrics.json",
+                "metrics.csv",
+                "per_image_metrics.csv",
+                "gallery.json",
+                "gallery_selection.json",
+            ):
+                artifact.add_file(str(test_dir_path / filename), name=filename)
+            gallery_dir = test_dir_path / "gallery"
+            for path in sorted(gallery_dir.rglob("*.png")):
+                relative = path.relative_to(test_dir_path).as_posix()
+                artifact.add_file(str(path), name=relative)
+            self.run.log_artifact(
+                artifact,
+                aliases=["final", f"seed{self.config['seed']}"],
+            )
+
+        self._safe_call("evaluation_artifact", log)
 
     def finish(self) -> None:
         if not self.active:

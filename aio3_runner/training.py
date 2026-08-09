@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Dict, Mapping, MutableMapping, Optional
 
 import torch
-import torch.nn.functional as F
 
 from dcnv4_restoration_model import validate_restoration_checkpoint
 
@@ -121,21 +120,11 @@ class TrainingMetricWindow:
             "diagnostics/residual_std": mean["residual_std"],
             "diagnostics/residual_min": self.residual_min,
             "diagnostics/residual_max": self.residual_max,
-            "diagnostics/residual_negative_fraction": mean[
-                "residual_negative_fraction"
-            ],
-            "diagnostics/residual_positive_fraction": mean[
-                "residual_positive_fraction"
-            ],
-            "diagnostics/residual_near_zero_fraction": mean[
-                "residual_near_zero_fraction"
-            ],
-            "diagnostics/prediction_below_zero_fraction": mean[
-                "prediction_below_zero_fraction"
-            ],
-            "diagnostics/prediction_above_one_fraction": mean[
-                "prediction_above_one_fraction"
-            ],
+            "diagnostics/residual_negative_fraction": mean["residual_negative_fraction"],
+            "diagnostics/residual_positive_fraction": mean["residual_positive_fraction"],
+            "diagnostics/residual_near_zero_fraction": mean["residual_near_zero_fraction"],
+            "diagnostics/prediction_below_zero_fraction": mean["prediction_below_zero_fraction"],
+            "diagnostics/prediction_above_one_fraction": mean["prediction_above_one_fraction"],
         }
         for task in TASKS:
             metrics[f"diagnostics/{task}/residual_negative_fraction"] = mean[
@@ -145,9 +134,7 @@ class TrainingMetricWindow:
             metrics["system/gpu_memory_allocated_gib"] = (
                 torch.cuda.memory_allocated(device) / 1024**3
             )
-            metrics["system/gpu_memory_reserved_gib"] = (
-                torch.cuda.memory_reserved(device) / 1024**3
-            )
+            metrics["system/gpu_memory_reserved_gib"] = torch.cuda.memory_reserved(device) / 1024**3
         return metrics
 
 
@@ -237,9 +224,7 @@ def run_training(
         raise RuntimeError("AIO3 DCNv4 training requires a CUDA GPU")
     device = torch.device("cuda", 0)
     torch.backends.cudnn.benchmark = bool(config["training"]["cudnn_benchmark"])
-    torch.use_deterministic_algorithms(
-        bool(config["training"]["deterministic_algorithms"])
-    )
+    torch.use_deterministic_algorithms(bool(config["training"]["deterministic_algorithms"]))
     repository_state = git_state(repository_root)
     if repository_state["dirty"]:
         raise RuntimeError("Refusing to train from a dirty worktree")
@@ -416,18 +401,45 @@ def run_training(
                     flush=True,
                 )
                 metric_window = TrainingMetricWindow()
+                _update_run_state(
+                    run_dir,
+                    status="running",
+                    global_step=global_step,
+                    best_metrics=best_metrics,
+                )
+
+            should_validate = global_step % validation_interval == 0 or global_step == max_steps
+            should_checkpoint = global_step % checkpoint_interval == 0 or global_step == max_steps
+            latest_path = checkpoints_dir / "latest.pth"
+            if should_checkpoint or should_validate:
+                _save_training_checkpoint(
+                    path=latest_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    global_step=global_step,
+                    best_metrics=best_metrics,
+                    config=config,
+                )
+                loaded_latest = load_checkpoint(latest_path)
+                if int(loaded_latest["global_step"]) != global_step:
+                    raise RuntimeError("Checkpoint round-trip changed global_step")
 
             validation_improved = False
-            if global_step % validation_interval == 0 or global_step == max_steps:
+            if should_validate:
+                _update_run_state(
+                    run_dir,
+                    status="validating",
+                    global_step=global_step,
+                    best_metrics=best_metrics,
+                )
                 capture_media = global_step % media_interval == 0
                 result = evaluate_model(
                     model,
                     validation_loader,
                     device=device,
                     global_step=global_step,
-                    visual_sample_ids=(
-                        fixed_visual_sample_ids if capture_media else None
-                    ),
+                    visual_sample_ids=(fixed_visual_sample_ids if capture_media else None),
                     visual_dir=(
                         run_dir / "validation" / "media" / f"step_{global_step:06d}"
                         if capture_media
@@ -463,11 +475,8 @@ def run_training(
                     flush=True,
                 )
 
-            should_checkpoint = (
-                global_step % checkpoint_interval == 0 or global_step == max_steps
-            )
-            if should_checkpoint or validation_improved:
-                latest_path = checkpoints_dir / "latest.pth"
+            if validation_improved:
+                # Refresh latest with the newly selected best metrics after validation.
                 _save_training_checkpoint(
                     path=latest_path,
                     model=model,
@@ -477,29 +486,30 @@ def run_training(
                     best_metrics=best_metrics,
                     config=config,
                 )
-                loaded_latest = load_checkpoint(latest_path)
-                if int(loaded_latest["global_step"]) != global_step:
-                    raise RuntimeError("Checkpoint round-trip changed global_step")
-                if validation_improved:
-                    _save_training_checkpoint(
-                        path=checkpoints_dir / "best_macro_psnr.pth",
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        global_step=global_step,
-                        best_metrics=best_metrics,
-                        config=config,
-                    )
-                if global_step % milestone_interval == 0:
-                    _save_training_checkpoint(
-                        path=checkpoints_dir / f"step_{global_step:06d}.pth",
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        global_step=global_step,
-                        best_metrics=best_metrics,
-                        config=config,
-                    )
+                _save_training_checkpoint(
+                    path=checkpoints_dir / "best_macro_psnr.pth",
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    global_step=global_step,
+                    best_metrics=best_metrics,
+                    config=config,
+                )
+
+            if global_step % milestone_interval == 0:
+                # Milestones are written after validation so their best-metric
+                # metadata reflects the completed validation at this step.
+                _save_training_checkpoint(
+                    path=checkpoints_dir / f"step_{global_step:06d}.pth",
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    global_step=global_step,
+                    best_metrics=best_metrics,
+                    config=config,
+                )
+
+            if should_checkpoint or should_validate or validation_improved:
                 _update_run_state(
                     run_dir,
                     status="running" if global_step < max_steps else "completed",
@@ -533,8 +543,7 @@ def run_training(
                 message="Requested safe pause at optimizer-step boundary",
             )
             print(
-                f"safe pause completed at step={global_step}; "
-                f"resume from {latest_path}",
+                f"safe pause completed at step={global_step}; " f"resume from {latest_path}",
                 flush=True,
             )
 

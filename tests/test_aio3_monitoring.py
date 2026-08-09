@@ -178,9 +178,7 @@ def test_wandb_monitor_preserves_rng_and_logs_frozen_axes_and_artifacts():
             ],
             residual_histogram=[-0.1, 0.0, 0.1],
         )
-        monitor.update_best_summary(
-            {"macro_psnr": 20.0, "macro_ssim": 0.8, "global_step": 10}
-        )
+        monitor.update_best_summary({"macro_psnr": 20.0, "macro_ssim": 0.8, "global_step": 10})
         monitor.finish()
 
         torch.testing.assert_close(torch.rand(4), expected_torch)
@@ -219,10 +217,88 @@ def test_disabled_monitor_does_not_require_wandb_sdk():
             sys.modules["wandb"] = existing_wandb
 
 
+def test_resumed_monitor_logs_formal_test_tables_and_small_artifact():
+    fake_wandb = _install_fake_wandb()
+    with _workspace_temporary_directory() as root:
+        _prepare_run_files(root)
+        test_dir = root / "test"
+        gallery_dir = test_dir / "gallery" / "sample"
+        gallery_dir.mkdir(parents=True)
+        for filename in (
+            "metrics.json",
+            "metrics.csv",
+            "per_image_metrics.csv",
+            "gallery.json",
+            "gallery_selection.json",
+        ):
+            (test_dir / filename).write_text("{}\n", encoding="utf-8")
+        gallery_image = gallery_dir / "prediction.png"
+        gallery_image.write_bytes(b"unit")
+        visual_paths = {}
+        for name in (
+            "input",
+            "prediction",
+            "target",
+            "absolute_error",
+            "signed_residual",
+        ):
+            path = root / f"{name}.png"
+            path.write_bytes(b"unit")
+            visual_paths[f"{name}_path"] = path
+
+        monitor = WandbMonitor(config=_config(root), run_dir=root, resume=True)
+        monitor.log_test_evaluation(
+            global_step=10,
+            summary={"macro/psnr": 20.0, "macro/ssim": 0.8},
+            per_image=[
+                {
+                    "dataset": "BSD68_sigma25",
+                    "task": "denoise",
+                    "sigma": 25,
+                    "sample_id": "unit-sample",
+                    "psnr": 20.0,
+                    "ssim": 0.8,
+                    "inference_time_seconds": 0.01,
+                }
+            ],
+            visuals=[
+                {
+                    "task": "denoise",
+                    "sigma": 25,
+                    "sample_id": "unit-sample",
+                    "psnr": 20.0,
+                    "ssim": 0.8,
+                    "residual_mean": -0.01,
+                    "residual_negative_fraction": 0.6,
+                    **visual_paths,
+                }
+            ],
+        )
+        monitor.log_evaluation_artifact(
+            test_dir,
+            metadata={"checkpoint_sha256": "unit"},
+        )
+        monitor.finish()
+
+        assert fake_wandb.init_kwargs["resume"] == "must"
+        test_log = fake_wandb.run.logs[-1]
+        assert test_log["global_step"] == 10
+        assert test_log["test/macro/psnr"] == 20.0
+        assert len(test_log["test/per_image_metrics"].rows) == 1
+        assert len(test_log["test/fixed_gallery"].rows) == 1
+        artifact, aliases = fake_wandb.run.artifacts[-1]
+        assert artifact.kwargs["type"] == "evaluation"
+        assert aliases == ["final", "seed3407"]
+        uploaded_names = {name for _, name in artifact.files}
+        assert "gallery/sample/prediction.png" in uploaded_names
+        assert all("predictions/" not in name for name in uploaded_names)
+
+
 if __name__ == "__main__":
     tests = [
         test_wandb_monitor_preserves_rng_and_logs_frozen_axes_and_artifacts,
         test_disabled_monitor_does_not_require_wandb_sdk,
+        test_resumed_monitor_logs_formal_test_tables_and_small_artifact,
     ]
     for test in tests:
         test()

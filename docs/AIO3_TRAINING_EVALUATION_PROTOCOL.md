@@ -419,6 +419,12 @@ checkpoints/step_200000.pth
 `latest.pth` 并恢复 optimizer、scheduler、global step 和 RNG。只加载模型权重开始
 新实验时必须生成新的 run，并明确标记为 initialization，而不是 resume。
 
+每到验证边界，runner 必须先原子保存并回读校验 `latest.pth`，再把
+`run_state.json` 写为 `validating/<global_step>`，最后才执行原始分辨率验证。验证失败时，
+该 step 的模型、optimizer、scheduler 和 RNG 因而仍可恢复；验证成功后才更新最佳指标、
+`best_macro_psnr.pth` 和 `completed/running` 状态。标量窗口落盘时同步刷新
+`run_state.json` 的当前 step，不能在长训练期间一直显示 0。
+
 ## 11. 验证与最佳模型选择
 
 验证每 5000 optimizer steps 执行一次，使用原始分辨率和 batch size 1，不做随机
@@ -470,6 +476,20 @@ SSIM 使用相同方式计算 macro。`best_macro_psnr.pth` 只按验证集 macr
   和融合方法，并在结果中记录；
 - 输出文件名必须保留样本唯一 ID，不能按 dataloader 序号命名；
 - 不覆盖已有预测目录。
+
+正式训练完成后，在同一干净代码 commit 上执行：
+
+```bash
+python -m aio3_runner.evaluate \
+  --checkpoint "${RUN_DIR}/checkpoints/best_macro_psnr.pth" \
+  --num-workers 4
+```
+
+评测入口只接受 `run_kind=formal` 且状态为 `completed` 的
+`best_macro_psnr.pth`；smoke/pilot checkpoint 会被拒绝，防止提前使用测试集。测试 gallery
+在推理前仅依据 sample ID 哈希固定选择：每个噪声强度 2 张、去雨 4 张、去雾 4 张，
+总计 14 张，不得依据模型结果重新挑图。804 张预测全部保存在本地，但 W&B 只上传数值表
+和这 14 组 gallery。
 
 ## 13. 指标定义
 
@@ -916,6 +936,8 @@ test/total_runtime_seconds
 
 完整逐图指标以一个纯数值 `wandb.Table` 上传，包含 dataset、task、sigma、sample ID、
 PSNR、SSIM 和推理时间。不要在逐图表中附带全部高分辨率图片；图像只使用固定 gallery。
+同一服务器、同一 run 目录的正式测试恢复训练 run ID 并追加 `test/*`；evaluation Artifact
+包含 `metrics.json`、两类 CSV、gallery 描述和固定 gallery，不得包含完整 predictions。
 
 ### 14.14 官方接口依据
 
@@ -955,9 +977,13 @@ ${OUTPUT_ROOT}/dcnv4_unet/<run_name>/
 ├── wandb/
 ├── validation/
 └── test/
+    ├── state.json
     ├── metrics.json
     ├── metrics.csv
     ├── per_image_metrics.csv
+    ├── gallery_selection.json
+    ├── gallery.json
+    ├── gallery/
     └── predictions/
         ├── BSD68_sigma15/
         ├── BSD68_sigma25/
@@ -988,6 +1014,10 @@ ${OUTPUT_ROOT}/dcnv4_unet/<run_name>/
 12. 有符号残差诊断同时能够观察到正值与负值，且可视化采用固定色阶；
 13. 输出目录不在 Git 仓库和原始数据目录内；
 14. `config.yaml`、data manifest 和代码 commit 已冻结并被记录。
+15. 5000-step pilot 的训练、验证、checkpoint、W&B 和 70 张固定媒体审计通过；
+16. 人工复查 14 组固定验证样本，重点检查 sigma50 残余噪声、去雨内容误删和去雾
+    亮度/颜色偏差；
+17. 正式测试入口的合成测试通过，并确认它拒绝非 formal checkpoint。
 
 ## 17. 协议变更规则
 

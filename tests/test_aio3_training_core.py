@@ -1,3 +1,4 @@
+import json
 import math
 import shutil
 import sys
@@ -11,7 +12,11 @@ import torch
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from aio3_runner.training import TrainingMetricWindow, resolve_training_target_step
+from aio3_runner.training import (
+    TrainingMetricWindow,
+    _update_run_state,
+    resolve_training_target_step,
+)
 from aio3_runner.validation import evaluate_model
 
 
@@ -175,11 +180,30 @@ def test_safe_pause_target_is_strict_and_scalar_aligned():
             raise AssertionError(f"Invalid safe-pause request was accepted: {case}")
 
 
+def test_run_state_records_validation_boundary_at_current_step():
+    with _workspace_temporary_directory() as root:
+        _update_run_state(
+            root,
+            status="validating",
+            global_step=5000,
+            best_metrics={
+                "macro_psnr": 25.0,
+                "macro_ssim": 0.8,
+                "global_step": 4500,
+            },
+        )
+        state = json.loads((root / "run_state.json").read_text(encoding="utf-8"))
+        assert state["status"] == "validating"
+        assert state["global_step"] == 5000
+        assert state["best_global_step"] == 4500
+
+
 if __name__ == "__main__":
     tests = [
         test_training_window_tracks_balanced_tasks_and_raw_prediction_range,
         test_native_validation_runs_all_required_metric_groups_and_restores_mode,
         test_safe_pause_target_is_strict_and_scalar_aligned,
+        test_run_state_records_validation_boundary_at_current_step,
     ]
     for test in tests:
         test()
