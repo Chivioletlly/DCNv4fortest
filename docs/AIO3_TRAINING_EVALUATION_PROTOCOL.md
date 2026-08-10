@@ -11,6 +11,9 @@
 论文的模型专属训练技巧。若改变数据划分、损失函数、噪声生成、采样比例或评测实现，
 必须使用新的协议版本，不能继续标记为 `AIO3-v1`。
 
+其他模型贡献者可先阅读执行摘要、接入清单和合规报告模板：
+[`AIO3_MODEL_COMPARISON_STANDARD.md`](AIO3_MODEL_COMPARISON_STANDARD.md)。
+
 当前已验证的 DCNv4 模型约束如下：
 
 - 模型输入和输出均为 `[B, 3, H, W]` RGB 张量；

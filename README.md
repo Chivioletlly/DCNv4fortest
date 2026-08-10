@@ -88,7 +88,9 @@ python -m aio3_runner.prepare_data \
 The command refuses to overwrite an existing audit by default. Do not use
 `--skip-image-verification` for a formal run. The protocol, exact counts, split rules,
 metrics, W&B layout, and output contract are defined in
-`docs/AIO3_TRAINING_EVALUATION_PROTOCOL.md`.
+`docs/AIO3_TRAINING_EVALUATION_PROTOCOL.md`. Contributors adapting another restoration
+network should follow the model-neutral comparison checklist and reporting template in
+`docs/AIO3_MODEL_COMPARISON_STANDARD.md`.
 
 The manifest tests can run without pytest:
 
