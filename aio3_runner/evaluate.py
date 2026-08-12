@@ -107,7 +107,6 @@ def _resolve_formal_evaluation(checkpoint_path: Path):
         config=config,
         current_repository_commit=str(repository_state["commit"]),
     )
-    validate_restoration_checkpoint(dict(checkpoint["architecture"]))
     run_state = json.loads((run_dir / "run_state.json").read_text(encoding="utf-8"))
     max_steps = int(config["training"]["max_steps"])
     if run_state.get("status") != "completed" or int(run_state["global_step"]) != max_steps:
@@ -165,8 +164,12 @@ def main() -> None:
 
     monitor: Optional[WandbMonitor] = None
     try:
-        monitor = WandbMonitor(config=config, run_dir=run_dir, resume=True)
         model = build_dcnv4_unet(dict(config)).to(device)
+        validate_restoration_checkpoint(
+            dict(checkpoint["architecture"]),
+            expected=model.checkpoint_metadata(),
+        )
+        monitor = WandbMonitor(config=config, run_dir=run_dir, resume=True)
         total_parameters, trainable_parameters = model_parameter_counts(model)
         if total_parameters != trainable_parameters or total_parameters != int(
             config["model"]["expected_parameters"]

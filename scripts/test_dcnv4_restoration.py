@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 from dcnv4_restoration_model import (
     DCNv4FeatureBlock,
     DCNv4RestorationUNet,
+    DegradationAwareDCNv4RestorationUNet,
     count_parameters,
 )
 
@@ -24,6 +25,11 @@ def parse_args():
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--base-channels", type=int, default=64)
+    parser.add_argument(
+        "--model-variant",
+        choices=("baseline", "degradation-aware"),
+        default="baseline",
+    )
     return parser.parse_args()
 
 
@@ -88,7 +94,12 @@ def main():
         raise RuntimeError("This integration test requires a CUDA GPU")
 
     device = torch.device("cuda")
-    model = DCNv4RestorationUNet(
+    model_class = (
+        DegradationAwareDCNv4RestorationUNet
+        if args.model_variant == "degradation-aware"
+        else DCNv4RestorationUNet
+    )
+    model = model_class(
         base_channels=args.base_channels,
         bottleneck_type="conv",
         use_dcnv4=True,

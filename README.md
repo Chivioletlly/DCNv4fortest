@@ -65,6 +65,48 @@ pytest -q tests/test_dcnv4_restoration_model.py
 python tests/test_dcnv4_restoration_model.py
 ```
 
+## Degradation-aware DCNv4 variant
+
+`DegradationAwareDCNv4RestorationUNet` keeps the signed-residual AIO contract while
+adding label-free multi-scale degradation prompts, prompt-conditioned DCNv4 blocks,
+spatial-channel gated skip fusion, and FP32 context-gated frequency modulation at the
+bottleneck. The original `DCNv4RestorationUNet` remains unchanged as the frozen
+baseline. See [`docs/DEGRADATION_AWARE_DCNV4_DESIGN.md`](docs/DEGRADATION_AWARE_DCNV4_DESIGN.md)
+for the architecture trace, paper/code mapping, compatibility boundaries, and ablation
+plan.
+
+Start an isolated AIO3-v1 smoke run with:
+
+```bash
+python -m aio3_runner.train \
+  --manifest-dir /path/to/aio3-v1/manifests \
+  --output-root /path/to/outputs/AIO3/aio3-v1 \
+  --model-variant degradation-aware \
+  --run-kind smoke \
+  --run-name dcnv4-dacg-smoke-seed3407 \
+  --seed 3407 \
+  --wandb-mode offline
+```
+
+The aware model uses architecture version 4 and writes under
+`degradation_aware_dcnv4_unet/`; its checkpoints are intentionally incompatible with
+the version-3 baseline. Run its CPU structure/regression tests with:
+
+```bash
+python tests/test_degradation_aware_dcnv4_restoration_model.py
+```
+
+After building the real CUDA extension, validate the aware model's BF16/DCNv4/FFT
+boundaries on the training server:
+
+```bash
+python scripts/test_dcnv4_restoration.py \
+  --model-variant degradation-aware \
+  --batch-size 1 \
+  --height 128 \
+  --width 128
+```
+
 ## AIO3-v1 data audit and manifests
 
 The first stage of the frozen AIO3-v1 pipeline is implemented in `aio3_runner`.

@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 
 from .checkpoint import load_checkpoint
-from .runtime import load_run_config, prepare_new_run, seed_everything
+from .runtime import MODEL_VARIANTS, load_run_config, prepare_new_run, seed_everything
 from .training import run_training
 
 
@@ -18,7 +18,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train the signed-residual DCNv4 U-Net under AIO3-v1."
+        description="Train a signed-residual DCNv4 U-Net under AIO3-v1."
     )
     parser.add_argument(
         "--resume",
@@ -33,7 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-root",
         type=Path,
-        help="AIO3-v1 output root; a dcnv4_unet/<run_name> directory is created.",
+        help="AIO3-v1 output root; a model-specific run directory is created.",
+    )
+    parser.add_argument(
+        "--model-variant",
+        choices=MODEL_VARIANTS,
+        help=(
+            "Model for a new run. Omit for the frozen baseline; use "
+            "degradation-aware for DAM + gated skips + dual-domain modulation."
+        ),
     )
     parser.add_argument(
         "--run-kind",
@@ -68,8 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_run(args) -> tuple:
     resume_checkpoint: Optional[Path] = None
     if args.resume is not None:
-        if args.manifest_dir is not None or args.output_root is not None:
-            raise SystemExit("--resume cannot be combined with --manifest-dir/--output-root")
+        if (
+            args.manifest_dir is not None
+            or args.output_root is not None
+            or args.model_variant is not None
+        ):
+            raise SystemExit(
+                "--resume cannot be combined with "
+                "--manifest-dir/--output-root/--model-variant"
+            )
         resume_checkpoint = args.resume.expanduser().resolve()
         if resume_checkpoint.name != "latest.pth":
             raise SystemExit("Exact training resume must use checkpoints/latest.pth")
@@ -94,6 +109,7 @@ def _resolve_run(args) -> tuple:
         wandb_mode=args.wandb_mode,
         wandb_entity=args.wandb_entity,
         run_name=args.run_name,
+        model_variant=args.model_variant or "baseline",
     )
     return run_dir, config, resume_checkpoint
 

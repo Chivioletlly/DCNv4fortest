@@ -24,6 +24,15 @@ from .protocol import AIO3_PROTOCOL_VERSION
 
 
 MODEL_NAME = "dcnv4_unet"
+MODEL_VARIANTS = ("baseline", "degradation-aware")
+MODEL_DIRECTORIES = {
+    "baseline": MODEL_NAME,
+    "degradation-aware": "degradation_aware_dcnv4_unet",
+}
+BASELINE_EXPECTED_PARAMETERS = 29924411
+# Kept as a frozen constant once the architecture is defined. The model tests
+# independently recompute it so accidental topology changes fail loudly.
+DEGRADATION_AWARE_EXPECTED_PARAMETERS = 34852539
 WANDB_VERSION = "0.25.1"
 MANIFEST_FILES = ("train.jsonl", "val.jsonl", "test.jsonl")
 AUXILIARY_DATA_FILES = ("data_audit.json", "visual_samples.json")
@@ -198,16 +207,17 @@ def build_run_config(
     wandb_run_id: str,
     wandb_mode: str,
     wandb_entity: Optional[str],
+    model_variant: str = "baseline",
 ) -> Dict[str, object]:
     if run_kind not in RUN_PROFILES:
         raise ValueError(f"run_kind must be one of {tuple(RUN_PROFILES)}, got {run_kind!r}")
+    if model_variant not in MODEL_VARIANTS:
+        raise ValueError(
+            f"model_variant must be one of {MODEL_VARIANTS}, got {model_variant!r}"
+        )
     profile = RUN_PROFILES[run_kind]
-    return {
-        "protocol": AIO3_PROTOCOL_VERSION,
-        "run_kind": run_kind,
-        "run_name": run_name,
-        "seed": int(seed),
-        "model": {
+    if model_variant == "baseline":
+        model_config = {
             "name": "dcnv4_restoration_unet",
             "in_channels": 3,
             "base_channels": 64,
@@ -215,10 +225,34 @@ def build_run_config(
             "use_dcnv4": True,
             "output_mode": "signed_residual",
             "normalization": "groupnorm",
-            "expected_parameters": 29924411,
+            "expected_parameters": BASELINE_EXPECTED_PARAMETERS,
             "initialization": "exact_identity_zero_initialized_signed_residual_head",
             "autocast": "bf16_network_fp32_dcnv4",
-        },
+        }
+    else:
+        model_config = {
+            "name": "degradation_aware_dcnv4_restoration_unet",
+            "in_channels": 3,
+            "base_channels": 64,
+            "bottleneck_type": "conv",
+            "use_dcnv4": True,
+            "context_scales": 3,
+            "output_mode": "signed_residual",
+            "normalization": "groupnorm",
+            "expected_parameters": DEGRADATION_AWARE_EXPECTED_PARAMETERS,
+            "initialization": "exact_identity_zero_initialized_signed_residual_head",
+            "autocast": "bf16_network_fp32_dcnv4_fft",
+            "degradation_context": "multi_scale_mean_std_prompt",
+            "skip_fusion": "adaptive_spatial_channel_gate",
+            "bottleneck_modulation": "context_gated_dual_domain",
+            "dcnv4_conditioning": "prompt_affine_and_output_gate",
+        }
+    return {
+        "protocol": AIO3_PROTOCOL_VERSION,
+        "run_kind": run_kind,
+        "run_name": run_name,
+        "seed": int(seed),
+        "model": model_config,
         "data": {
             "patch_size": 128,
             "batch_size": 12,
@@ -338,8 +372,13 @@ def prepare_new_run(
     wandb_mode: str,
     wandb_entity: Optional[str],
     run_name: Optional[str] = None,
+    model_variant: str = "baseline",
 ) -> Tuple[Path, Dict[str, object]]:
     repository_state = git_state(repository_root)
+    if model_variant not in MODEL_VARIANTS:
+        raise ValueError(
+            f"model_variant must be one of {MODEL_VARIANTS}, got {model_variant!r}"
+        )
     if wandb_mode not in {"online", "offline", "disabled"}:
         raise ValueError(f"Unsupported W&B mode: {wandb_mode!r}")
     if run_kind == "formal" and wandb_mode == "disabled":
@@ -369,8 +408,13 @@ def prepare_new_run(
     verified_source = verify_manifest_bundle(manifest_dir)
     if run_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        run_name = f"dcnv4-unet-{run_kind}-seed{seed}-{timestamp}"
-    run_dir = Path(output_root).expanduser().resolve() / MODEL_NAME / run_name
+        model_slug = MODEL_DIRECTORIES[model_variant].replace("_", "-")
+        run_name = f"{model_slug}-{run_kind}-seed{seed}-{timestamp}"
+    run_dir = (
+        Path(output_root).expanduser().resolve()
+        / MODEL_DIRECTORIES[model_variant]
+        / run_name
+    )
     if run_dir.exists():
         raise FileExistsError(f"Run directory already exists: {run_dir}")
     run_dir.mkdir(parents=True)
@@ -397,6 +441,7 @@ def prepare_new_run(
         wandb_run_id=wandb_run_id,
         wandb_mode=wandb_mode,
         wandb_entity=wandb_entity,
+        model_variant=model_variant,
     )
     atomic_write_json(run_dir / "config.yaml", config)
     atomic_write_json(run_dir / "environment.json", environment_info(repository_state))

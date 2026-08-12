@@ -60,7 +60,15 @@ class WandbMonitor:
         requested_entity = config["monitoring"].get("entity")
         if requested_entity is not None:
             os.environ["WANDB_ENTITY"] = str(requested_entity)
-        tags = ["aio3-v1", "dcnv4", "baseline", "signed-residual"]
+        model_name = str(
+            config.get("model", {}).get("name", "dcnv4_restoration_unet")
+        )
+        model_tag = (
+            "degradation-aware"
+            if model_name == "degradation_aware_dcnv4_restoration_unet"
+            else "baseline"
+        )
+        tags = ["aio3-v1", "dcnv4", model_tag, "signed-residual"]
         tags.append(str(config["run_kind"]))
         try:
             with (self.run_dir / "environment.json").open("r", encoding="utf-8") as stream:

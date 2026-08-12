@@ -243,7 +243,7 @@ def run_training(
         raise RuntimeError("Model parameters must remain FP32; use autocast for BF16")
     total_parameters, trainable_parameters = model_parameter_counts(model)
     if total_parameters != trainable_parameters:
-        raise RuntimeError("Frozen baseline expects every model parameter to be trainable")
+        raise RuntimeError("AIO3 DCNv4 models require every parameter to be trainable")
     if total_parameters != int(config["model"]["expected_parameters"]):
         raise RuntimeError(
             "Model parameter count differs from frozen config: "
@@ -279,7 +279,10 @@ def run_training(
             config=config,
             current_repository_commit=str(repository_state["commit"]),
         )
-        validate_restoration_checkpoint(dict(checkpoint["architecture"]))
+        validate_restoration_checkpoint(
+            dict(checkpoint["architecture"]),
+            expected=model.checkpoint_metadata(),
+        )
         restore_training_state(
             checkpoint,
             model=model,
