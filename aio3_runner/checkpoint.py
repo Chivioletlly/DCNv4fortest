@@ -121,7 +121,10 @@ def atomic_torch_save(checkpoint: Mapping[str, object], path: Path) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         torch.save(dict(checkpoint), temporary)
-        with temporary.open("rb") as stream:
+        # Windows requires a writable handle for FlushFileBuffers (os.fsync),
+        # even though torch.save has already closed the file.  Reopen without
+        # truncation so the same durability guarantee works on Linux/Windows.
+        with temporary.open("rb+") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:

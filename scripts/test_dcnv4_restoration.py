@@ -13,10 +13,10 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from dcnv4_restoration_model import (
     DCNv4FeatureBlock,
-    DCNv4RestorationUNet,
-    DegradationAwareDCNv4RestorationUNet,
     count_parameters,
 )
+from aio3_runner.models import build_dcnv4_ablation_model
+from aio3_runner.runtime import MODEL_VARIANTS
 
 
 def parse_args():
@@ -27,8 +27,8 @@ def parse_args():
     parser.add_argument("--base-channels", type=int, default=64)
     parser.add_argument(
         "--model-variant",
-        choices=("baseline", "degradation-aware"),
-        default="baseline",
+        choices=MODEL_VARIANTS,
+        default="APG-000",
     )
     return parser.parse_args()
 
@@ -78,9 +78,7 @@ def validate_dcn_amp_boundary(blocks, records):
             )
 
         gradients = [
-            parameter.grad
-            for parameter in block.dcn.parameters()
-            if parameter.requires_grad
+            parameter.grad for parameter in block.dcn.parameters() if parameter.requires_grad
         ]
         if not gradients or any(gradient is None for gradient in gradients):
             raise AssertionError(f"{name} did not participate in backward")
@@ -94,12 +92,8 @@ def main():
         raise RuntimeError("This integration test requires a CUDA GPU")
 
     device = torch.device("cuda")
-    model_class = (
-        DegradationAwareDCNv4RestorationUNet
-        if args.model_variant == "degradation-aware"
-        else DCNv4RestorationUNet
-    )
-    model = model_class(
+    model = build_dcnv4_ablation_model(
+        args.model_variant,
         base_channels=args.base_channels,
         bottleneck_type="conv",
         use_dcnv4=True,

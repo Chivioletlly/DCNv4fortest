@@ -65,15 +65,26 @@ pytest -q tests/test_dcnv4_restoration_model.py
 python tests/test_dcnv4_restoration_model.py
 ```
 
-## Degradation-aware DCNv4 variant
+## Degradation-aware DCNv4 ablations
 
 `DegradationAwareDCNv4RestorationUNet` keeps the signed-residual AIO contract while
 adding label-free multi-scale degradation prompts, prompt-conditioned DCNv4 blocks,
 spatial-channel gated skip fusion, and FP32 context-gated frequency modulation at the
 bottleneck. The original `DCNv4RestorationUNet` remains unchanged as the frozen
-baseline. See [`docs/DEGRADATION_AWARE_DCNV4_DESIGN.md`](docs/DEGRADATION_AWARE_DCNV4_DESIGN.md)
-for the architecture trace, paper/code mapping, compatibility boundaries, and ablation
-plan.
+baseline. `aio3_runner.ablation` freezes all 16 variants from
+[`docs/AIO3_DCNV4_ABLATION_PLAN.md`](docs/AIO3_DCNV4_ABLATION_PLAN.md):
+
+```text
+APG-000 APG-100 APG-010 APG-001 APG-110 APG-101 APG-011 APG-111
+P-FILM P-DIN P-DOUT P-DIO
+SKIP-PROJ-000 SKIP-PROJ-011 CGDM-STATIC CGDM-SPATIAL
+```
+
+Each run config records the complete registry snapshot, canonical variant ID, A/P/G
+switches, conditioning paths, skip topology, bottleneck control, architecture version,
+frozen trainable parameter count, precision boundaries, W&B tags, and output directory.
+Legacy new-run aliases `baseline` and `degradation-aware` resolve to `APG-000` and
+`APG-111`; checkpoint resume continues to use the configuration stored in the run.
 
 Start an isolated AIO3-v1 smoke run with:
 
@@ -81,19 +92,21 @@ Start an isolated AIO3-v1 smoke run with:
 python -m aio3_runner.train \
   --manifest-dir /path/to/aio3-v1/manifests \
   --output-root /path/to/outputs/AIO3/aio3-v1 \
-  --model-variant degradation-aware \
+  --model-variant APG-111 \
   --run-kind smoke \
-  --run-name dcnv4-dacg-smoke-seed3407 \
+  --run-name dcnv4-ablation-apg-111-smoke-seed3407 \
   --seed 3407 \
   --wandb-mode offline
 ```
 
-The aware model uses architecture version 4 and writes under
-`degradation_aware_dcnv4_unet/`; its checkpoints are intentionally incompatible with
-the version-3 baseline. Run its CPU structure/regression tests with:
+The historical full model keeps architecture version 4 and the baseline keeps version
+3. New non-anchor ablations use version 5. All new runs write under
+`dcnv4_ablation/<VARIANT_ID>/`. Run the anchor and 16-variant structure/regression
+tests with:
 
 ```bash
 python tests/test_degradation_aware_dcnv4_restoration_model.py
+pytest -q tests/test_dcnv4_ablation.py
 ```
 
 After building the real CUDA extension, validate the aware model's BF16/DCNv4/FFT
@@ -101,7 +114,7 @@ boundaries on the training server:
 
 ```bash
 python scripts/test_dcnv4_restoration.py \
-  --model-variant degradation-aware \
+  --model-variant APG-111 \
   --batch-size 1 \
   --height 128 \
   --width 128

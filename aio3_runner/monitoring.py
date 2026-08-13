@@ -60,16 +60,12 @@ class WandbMonitor:
         requested_entity = config["monitoring"].get("entity")
         if requested_entity is not None:
             os.environ["WANDB_ENTITY"] = str(requested_entity)
-        model_name = str(
-            config.get("model", {}).get("name", "dcnv4_restoration_unet")
+        configured_tags = config["monitoring"].get("tags")
+        tags = (
+            [str(value) for value in configured_tags]
+            if configured_tags is not None
+            else ["aio3-v1", "dcnv4", "signed-residual", str(config["run_kind"])]
         )
-        model_tag = (
-            "degradation-aware"
-            if model_name == "degradation_aware_dcnv4_restoration_unet"
-            else "baseline"
-        )
-        tags = ["aio3-v1", "dcnv4", model_tag, "signed-residual"]
-        tags.append(str(config["run_kind"]))
         try:
             with (self.run_dir / "environment.json").open("r", encoding="utf-8") as stream:
                 environment = json.load(stream)
@@ -207,12 +203,10 @@ class WandbMonitor:
         ]
         for sigma in (15, 25, 50):
             nested_metrics.extend(
-                f"val/denoise/sigma{sigma}/{metric}"
-                for metric in ("psnr", "ssim", "images")
+                f"val/denoise/sigma{sigma}/{metric}" for metric in ("psnr", "ssim", "images")
             )
             nested_metrics.extend(
-                f"test/bsd68/sigma{sigma}/{metric}"
-                for metric in ("psnr", "ssim", "images")
+                f"test/bsd68/sigma{sigma}/{metric}" for metric in ("psnr", "ssim", "images")
             )
         for metric in nested_metrics:
             self.run.define_metric(metric, step_metric="global_step")
@@ -247,6 +241,12 @@ class WandbMonitor:
             str(self.run_dir / "AIO3_TRAINING_EVALUATION_PROTOCOL.md"),
             name="AIO3_TRAINING_EVALUATION_PROTOCOL.md",
         )
+        ablation_plan = self.run_dir / "AIO3_DCNV4_ABLATION_PLAN.md"
+        if ablation_plan.is_file():
+            artifact.add_file(
+                str(ablation_plan),
+                name="AIO3_DCNV4_ABLATION_PLAN.md",
+            )
         artifact.add_file(str(self.run_dir / "config.yaml"), name="config.yaml")
         self.run.log_artifact(artifact)
 

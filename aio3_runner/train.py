@@ -39,8 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-variant",
         choices=MODEL_VARIANTS,
         help=(
-            "Model for a new run. Omit for the frozen baseline; use "
-            "degradation-aware for DAM + gated skips + dual-domain modulation."
+            "Frozen ablation registry ID for a new run. Omit for APG-000. "
+            "Legacy aliases baseline and degradation-aware remain accepted."
         ),
     )
     parser.add_argument(
@@ -82,8 +82,7 @@ def _resolve_run(args) -> tuple:
             or args.model_variant is not None
         ):
             raise SystemExit(
-                "--resume cannot be combined with "
-                "--manifest-dir/--output-root/--model-variant"
+                "--resume cannot be combined with " "--manifest-dir/--output-root/--model-variant"
             )
         resume_checkpoint = args.resume.expanduser().resolve()
         if resume_checkpoint.name != "latest.pth":
@@ -109,7 +108,7 @@ def _resolve_run(args) -> tuple:
         wandb_mode=args.wandb_mode,
         wandb_entity=args.wandb_entity,
         run_name=args.run_name,
-        model_variant=args.model_variant or "baseline",
+        model_variant=args.model_variant or "APG-000",
     )
     return run_dir, config, resume_checkpoint
 

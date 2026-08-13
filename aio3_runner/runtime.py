@@ -20,15 +20,28 @@ import PIL
 import torch
 import torchvision
 
+from .ablation import (
+    ABLATION_REGISTRY,
+    ABLATION_REGISTRY_VERSION,
+    MODEL_VARIANT_CHOICES,
+    get_ablation_variant,
+    normalize_variant_id,
+    registry_snapshot,
+)
 from .protocol import AIO3_PROTOCOL_VERSION
 
 
 MODEL_NAME = "dcnv4_unet"
-MODEL_VARIANTS = ("baseline", "degradation-aware")
+MODEL_VARIANTS = MODEL_VARIANT_CHOICES
 MODEL_DIRECTORIES = {
-    "baseline": MODEL_NAME,
-    "degradation-aware": "degradation_aware_dcnv4_unet",
+    variant_id: variant.output_directory for variant_id, variant in ABLATION_REGISTRY.items()
 }
+MODEL_DIRECTORIES.update(
+    {
+        "baseline": ABLATION_REGISTRY["APG-000"].output_directory,
+        "degradation-aware": ABLATION_REGISTRY["APG-111"].output_directory,
+    }
+)
 BASELINE_EXPECTED_PARAMETERS = 29924411
 # Kept as a frozen constant once the architecture is defined. The model tests
 # independently recompute it so accidental topology changes fail loudly.
@@ -137,9 +150,7 @@ def verify_manifest_bundle(manifest_dir: Path) -> Dict[str, object]:
         actual = file_sha256(path)
         expected = audit_manifests.get(filename, {}).get("sha256")
         if actual != expected:
-            raise RuntimeError(
-                f"Manifest SHA256 mismatch for {filename}: {actual} != {expected}"
-            )
+            raise RuntimeError(f"Manifest SHA256 mismatch for {filename}: {actual} != {expected}")
         hashes[filename] = actual
 
     visual_path = manifest_dir / "visual_samples.json"
@@ -149,8 +160,7 @@ def verify_manifest_bundle(manifest_dir: Path) -> Dict[str, object]:
     expected_visual_sha = audit.get("visual_samples", {}).get("sha256")
     if visual_sha != expected_visual_sha:
         raise RuntimeError(
-            "visual_samples.json SHA256 mismatch: "
-            f"{visual_sha} != {expected_visual_sha}"
+            "visual_samples.json SHA256 mismatch: " f"{visual_sha} != {expected_visual_sha}"
         )
     hashes["visual_samples.json"] = visual_sha
     hashes["data_audit.json"] = file_sha256(audit_path)
@@ -208,51 +218,34 @@ def build_run_config(
     wandb_mode: str,
     wandb_entity: Optional[str],
     model_variant: str = "baseline",
+    output_root: Optional[Path] = None,
 ) -> Dict[str, object]:
     if run_kind not in RUN_PROFILES:
         raise ValueError(f"run_kind must be one of {tuple(RUN_PROFILES)}, got {run_kind!r}")
-    if model_variant not in MODEL_VARIANTS:
-        raise ValueError(
-            f"model_variant must be one of {MODEL_VARIANTS}, got {model_variant!r}"
-        )
+    variant = get_ablation_variant(model_variant)
     profile = RUN_PROFILES[run_kind]
-    if model_variant == "baseline":
-        model_config = {
-            "name": "dcnv4_restoration_unet",
+    model_config = variant.model_config()
+    model_config.update(
+        {
             "in_channels": 3,
             "base_channels": 64,
             "bottleneck_type": "conv",
             "use_dcnv4": True,
             "output_mode": "signed_residual",
             "normalization": "groupnorm",
-            "expected_parameters": BASELINE_EXPECTED_PARAMETERS,
             "initialization": "exact_identity_zero_initialized_signed_residual_head",
-            "autocast": "bf16_network_fp32_dcnv4",
         }
-    else:
-        model_config = {
-            "name": "degradation_aware_dcnv4_restoration_unet",
-            "in_channels": 3,
-            "base_channels": 64,
-            "bottleneck_type": "conv",
-            "use_dcnv4": True,
-            "context_scales": 3,
-            "output_mode": "signed_residual",
-            "normalization": "groupnorm",
-            "expected_parameters": DEGRADATION_AWARE_EXPECTED_PARAMETERS,
-            "initialization": "exact_identity_zero_initialized_signed_residual_head",
-            "autocast": "bf16_network_fp32_dcnv4_fft",
-            "degradation_context": "multi_scale_mean_std_prompt",
-            "skip_fusion": "adaptive_spatial_channel_gate",
-            "bottleneck_modulation": "context_gated_dual_domain",
-            "dcnv4_conditioning": "prompt_affine_and_output_gate",
-        }
+    )
+    if variant.degradation_context != "none":
+        model_config["context_scales"] = 3
     return {
         "protocol": AIO3_PROTOCOL_VERSION,
         "run_kind": run_kind,
         "run_name": run_name,
         "seed": int(seed),
         "model": model_config,
+        "ablation_registry_version": ABLATION_REGISTRY_VERSION,
+        "ablation_registry": registry_snapshot(),
         "data": {
             "patch_size": 128,
             "batch_size": 12,
@@ -301,21 +294,24 @@ def build_run_config(
             "wandb_run_id": wandb_run_id,
             "upload_manifest_artifact": True,
             "upload_best_checkpoint_artifact": True,
+            "tags": [*variant.wandb_tags, run_kind],
         },
         "source": {
             "repository_commit": repository_state["commit"],
             "repository_dirty": repository_state["dirty"],
-            "protocol_document_sha256": repository_state[
-                "protocol_document_sha256"
-            ],
+            "protocol_document_sha256": repository_state["protocol_document_sha256"],
+            "ablation_plan_sha256": repository_state.get("ablation_plan_sha256"),
         },
         "paths": {
-            "output_root": str(run_dir.parents[1]),
+            "output_root": str(
+                Path(output_root).expanduser().resolve()
+                if output_root is not None
+                else run_dir.parents[1]
+            ),
             "run_dir": str(run_dir),
             "manifest_dir": str(run_dir / "manifests"),
-            "protocol_document": str(
-                run_dir / "AIO3_TRAINING_EVALUATION_PROTOCOL.md"
-            ),
+            "protocol_document": str(run_dir / "AIO3_TRAINING_EVALUATION_PROTOCOL.md"),
+            "ablation_plan": str(run_dir / "AIO3_DCNV4_ABLATION_PLAN.md"),
         },
     }
 
@@ -375,10 +371,8 @@ def prepare_new_run(
     model_variant: str = "baseline",
 ) -> Tuple[Path, Dict[str, object]]:
     repository_state = git_state(repository_root)
-    if model_variant not in MODEL_VARIANTS:
-        raise ValueError(
-            f"model_variant must be one of {MODEL_VARIANTS}, got {model_variant!r}"
-        )
+    canonical_variant_id = normalize_variant_id(model_variant)
+    variant = get_ablation_variant(canonical_variant_id)
     if wandb_mode not in {"online", "offline", "disabled"}:
         raise ValueError(f"Unsupported W&B mode: {wandb_mode!r}")
     if run_kind == "formal" and wandb_mode == "disabled":
@@ -391,30 +385,26 @@ def prepare_new_run(
                 "W&B is enabled but the wandb SDK is not installed in this environment"
             ) from error
         if wandb.__version__ != WANDB_VERSION:
-            raise RuntimeError(
-                f"AIO3-v1 requires wandb=={WANDB_VERSION}, got {wandb.__version__}"
-            )
+            raise RuntimeError(f"AIO3-v1 requires wandb=={WANDB_VERSION}, got {wandb.__version__}")
     if repository_state["dirty"]:
         raise RuntimeError(
             "Refusing to start a frozen AIO3 run from a dirty worktree:\n"
             + str(repository_state["status_porcelain"])
         )
-    protocol_document = (
-        Path(repository_root) / "docs" / "AIO3_TRAINING_EVALUATION_PROTOCOL.md"
-    )
+    protocol_document = Path(repository_root) / "docs" / "AIO3_TRAINING_EVALUATION_PROTOCOL.md"
     if not protocol_document.is_file():
         raise FileNotFoundError(f"Missing AIO3 protocol document: {protocol_document}")
     repository_state["protocol_document_sha256"] = file_sha256(protocol_document)
+    ablation_plan = Path(repository_root) / "docs" / "AIO3_DCNV4_ABLATION_PLAN.md"
+    if not ablation_plan.is_file():
+        raise FileNotFoundError(f"Missing DCNv4 ablation plan: {ablation_plan}")
+    repository_state["ablation_plan_sha256"] = file_sha256(ablation_plan)
     verified_source = verify_manifest_bundle(manifest_dir)
     if run_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        model_slug = MODEL_DIRECTORIES[model_variant].replace("_", "-")
-        run_name = f"{model_slug}-{run_kind}-seed{seed}-{timestamp}"
-    run_dir = (
-        Path(output_root).expanduser().resolve()
-        / MODEL_DIRECTORIES[model_variant]
-        / run_name
-    )
+        model_slug = canonical_variant_id.lower()
+        run_name = f"dcnv4-ablation-{model_slug}-{run_kind}-seed{seed}-{timestamp}"
+    run_dir = Path(output_root).expanduser().resolve() / variant.output_directory / run_name
     if run_dir.exists():
         raise FileExistsError(f"Run directory already exists: {run_dir}")
     run_dir.mkdir(parents=True)
@@ -423,6 +413,10 @@ def prepare_new_run(
     shutil.copy2(
         protocol_document,
         run_dir / "AIO3_TRAINING_EVALUATION_PROTOCOL.md",
+    )
+    shutil.copy2(
+        ablation_plan,
+        run_dir / "AIO3_DCNV4_ABLATION_PLAN.md",
     )
 
     copied_hashes = _copy_manifest_bundle(
@@ -441,7 +435,8 @@ def prepare_new_run(
         wandb_run_id=wandb_run_id,
         wandb_mode=wandb_mode,
         wandb_entity=wandb_entity,
-        model_variant=model_variant,
+        model_variant=canonical_variant_id,
+        output_root=output_root,
     )
     atomic_write_json(run_dir / "config.yaml", config)
     atomic_write_json(run_dir / "environment.json", environment_info(repository_state))
