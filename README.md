@@ -1,5 +1,9 @@
 # General Degradation Decomposition Network
 
+## CDD-11 三模型比较
+
+CDD-11 的数据审计、训练、恢复、验证和正式测试入口位于 `cdd11_runner`。冻结的实验规范及命令见 [docs/CDD11_TRAINING_EVALUATION_PROTOCOL.md](docs/CDD11_TRAINING_EVALUATION_PROTOCOL.md)。现有 `aio3_runner` 保持独立，不参与 CDD-11 运行。
+
 General Degradation Decomposition Network for image processing and restoration tasks.
 
 ## AIO-3 DCNv4 restoration baseline
