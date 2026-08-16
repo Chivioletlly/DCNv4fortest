@@ -31,6 +31,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--microbatch-size", type=int, default=1)
     parser.add_argument("--inference-mode", choices=("native", "tiled"), default="native")
     parser.add_argument("--pause-at-step", type=int)
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default="online",
+        help="Use online for live dashboards or offline for later wandb sync.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        help="Optional W&B account/team; the SDK default is used when omitted.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="cdd11-restoration",
+        help="W&B project shared by all three comparison models.",
+    )
     return parser
 
 
@@ -71,6 +86,9 @@ def _resolve_run(args):
         inference_mode=args.inference_mode,
         uformer_root=args.uformer_root,
         run_name=args.run_name,
+        wandb_mode=args.wandb_mode,
+        wandb_entity=args.wandb_entity,
+        wandb_project=args.wandb_project,
     ), None)
 
 

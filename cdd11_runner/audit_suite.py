@@ -14,7 +14,7 @@ from .runtime import atomic_write_json, load_run_config
 
 
 def _common_config(config: Mapping[str, object]) -> Dict[str, object]:
-    return {
+    value = {
         key: config[key]
         for key in (
             "protocol",
@@ -26,9 +26,17 @@ def _common_config(config: Mapping[str, object]) -> Dict[str, object]:
             "scheduler",
             "validation",
             "checkpoint",
-            "monitoring",
         )
     }
+    monitoring = dict(config["monitoring"])
+    # Run IDs must be unique. Tags are compared after removing the one expected
+    # model-identity tag; all common monitoring tags remain audit-controlled.
+    monitoring.pop("wandb_run_id", None)
+    monitoring["tags"] = [
+        tag for tag in monitoring.get("tags", ()) if tag not in MODEL_IDS
+    ]
+    value["monitoring"] = monitoring
+    return value
 
 
 def audit_comparison_configs(

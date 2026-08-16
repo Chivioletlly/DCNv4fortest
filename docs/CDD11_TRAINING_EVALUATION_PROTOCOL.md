@@ -53,6 +53,27 @@ python -m cdd11_runner.prepare_data `
 - 正式训练：200000 optimizer steps；每 5000 步验证并保存 checkpoint，每 50000 步保存里程碑。
 - 随机种子：3407。采样由全局 optimizer step 决定，因此恢复训练不会重复或跳过 batch。
 
+### W&B 监控
+
+三个模型必须使用相同的 `--wandb-mode`、`--wandb-project` 和
+`--wandb-entity`。Python 3.9 环境固定使用 `wandb==0.25.1`。在线训练前先执行一次：
+
+```bash
+wandb login
+python -m cdd11_runner.wandb_check \
+  --output-root "$CDD11_OUTPUT_ROOT" \
+  --project cdd11-restoration \
+  --mode online
+```
+
+如使用团队账号，连接检查和三模型训练都增加同一个
+`--entity <account-or-team>`。每个运行生成唯一 `wandb_run_id.txt`；从
+`checkpoints/latest.pth` 恢复时使用同一 run ID 和 W&B `resume="must"`，不得手工创建
+新 ID。训练标量只在本地 `train_metrics.jsonl` 成功落盘后上传；验证标量和固定 22 张
+样本只在本地 JSON/CSV/PNG 成功落盘后上传。W&B 上传异常写入
+`logs/wandb_errors.jsonl`，不得改变训练 RNG、optimizer 或 checkpoint。本地文件始终是
+权威实验记录。不默认使用 `wandb.watch(model)`，避免权重和梯度 histogram 干扰训练速度。
+
 ## 4. 验收阶段
 
 按模型逐一执行，但三个模型必须使用同一清单、种子、微批大小和推理模式。
@@ -81,6 +102,8 @@ python -m cdd11_runner.train `
   --run-kind smoke `
   --microbatch-size 1 `
   --inference-mode native `
+  --wandb-mode online `
+  --wandb-project cdd11-restoration `
   --pause-at-step 50
 ```
 

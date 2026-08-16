@@ -32,6 +32,10 @@ def _configs():
                 num_workers=8,
                 microbatch_size=1,
                 inference_mode="tiled",
+                wandb_mode="online",
+                wandb_entity="unit-team",
+                wandb_project="cdd11-restoration",
+                wandb_run_id=f"wandb-{model_id}",
             )
         )
     return values
@@ -42,6 +46,7 @@ def test_suite_audit_accepts_only_one_of_each_model_with_identical_protocol():
     assert result["status"] == "pass"
     assert result["models"] == list(MODEL_IDS)
     assert len(result["common_config_sha256"]) == 64
+    assert "wandb_run_id" not in result["common_config"]["monitoring"]
 
 
 def test_suite_audit_rejects_cross_model_microbatch_drift():

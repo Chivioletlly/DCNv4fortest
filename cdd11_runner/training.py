@@ -26,6 +26,7 @@ from .models import (
     model_parameter_counts,
     validate_architecture_metadata,
 )
+from .monitoring import CDD11WandbMonitor
 from .protocol import DEGRADATIONS
 from .recover import validate_completed_run_artifacts
 from .runtime import (
@@ -356,7 +357,13 @@ def run_training(
     )
     model.train()
     safe_to_checkpoint = True
+    monitor: Optional[CDD11WandbMonitor] = None
     try:
+        monitor = CDD11WandbMonitor(
+            config=config,
+            run_dir=run_dir,
+            resume=resume_checkpoint is not None,
+        )
         for batch in train_loader:
             safe_to_checkpoint = False
             if device.type == "cuda":
@@ -396,6 +403,7 @@ def run_training(
             if global_step % scalar_interval == 0 or global_step == target_step:
                 metrics = metric_window.finish(global_step=global_step, device=device)
                 append_jsonl(run_dir / "train_metrics.jsonl", metrics)
+                monitor.log_scalars(metrics)
                 print(
                     f"step={global_step}/{max_steps} "
                     f"loss={metrics['train/loss']:.6f} "
@@ -442,6 +450,11 @@ def run_training(
                     {f"val/{key}": value for key, value in result.summary.items()}
                 )
                 append_jsonl(run_dir / "validation_metrics.jsonl", validation_log)
+                monitor.log_validation(
+                    global_step=global_step,
+                    summary=result.summary,
+                    visuals=result.visuals,
+                )
                 macro_psnr = float(result.summary["macro/psnr"])
                 if best_metrics["macro_psnr"] is None or macro_psnr > float(
                     best_metrics["macro_psnr"]
@@ -452,6 +465,7 @@ def run_training(
                         "global_step": global_step,
                     }
                     improved = True
+                    monitor.update_best_summary(best_metrics)
                 print(
                     f"validation step={global_step} macro_psnr={macro_psnr:.4f}",
                     flush=True,
@@ -544,3 +558,6 @@ def run_training(
             message=f"{type(error).__name__}: {error}",
         )
         raise
+    finally:
+        if monitor is not None:
+            monitor.finish()

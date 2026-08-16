@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple
@@ -12,6 +13,7 @@ from typing import Dict, Mapping, Optional, Tuple
 import yaml
 
 from aio3_runner.runtime import (
+    WANDB_VERSION,
     append_jsonl,
     atomic_write_json,
     file_sha256,
@@ -134,6 +136,11 @@ def build_run_config(
     num_workers: int,
     microbatch_size: int,
     inference_mode: str,
+    output_root: Optional[Path] = None,
+    wandb_mode: str = "disabled",
+    wandb_entity: Optional[str] = None,
+    wandb_project: str = "cdd11-restoration",
+    wandb_run_id: Optional[str] = None,
 ) -> Dict[str, object]:
     model_id = normalize_model_id(model_id)
     if run_kind not in RUN_PROFILES:
@@ -142,6 +149,12 @@ def build_run_config(
         raise ValueError("microbatch_size must be between 1 and 11")
     if inference_mode not in {"native", "tiled"}:
         raise ValueError("inference_mode must be 'native' or 'tiled'")
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        raise ValueError("wandb_mode must be 'online', 'offline', or 'disabled'")
+    if not wandb_project:
+        raise ValueError("wandb_project must be non-empty")
+    if wandb_mode != "disabled" and not wandb_run_id:
+        raise ValueError("Enabled W&B monitoring requires a frozen run ID")
     if model_id == "uformer" and (uformer_state is None or uformer_root is None):
         raise ValueError("Uformer config requires repository state and root")
     profile = RUN_PROFILES[run_kind]
@@ -198,10 +211,31 @@ def build_run_config(
             "milestone_interval_steps": 50_000,
         },
         "monitoring": {
-            "backend": "jsonl",
+            "provider": "wandb",
+            "version": WANDB_VERSION,
+            "mode": wandb_mode,
+            "entity": wandb_entity,
+            "project": wandb_project,
+            "group": (
+                f"{CDD11_PROTOCOL_VERSION}-{run_kind}-{inference_mode}-seed{seed}"
+            ),
+            "wandb_run_id": wandb_run_id,
+            "tags": [
+                CDD11_PROTOCOL_VERSION,
+                str(run_kind),
+                str(model_id),
+                str(inference_mode),
+                f"seed-{seed}",
+            ],
+            "local_backend": "jsonl",
             "scalar_interval_steps": int(profile["scalar_interval_steps"]),
         },
         "paths": {
+            "output_root": str(
+                Path(output_root).expanduser().resolve()
+                if output_root is not None
+                else Path(run_dir).resolve().parents[1]
+            ),
             "run_dir": str(Path(run_dir).resolve()),
             "manifest_dir": str((Path(run_dir) / "manifests").resolve()),
             "uformer_root": str(Path(uformer_root).resolve()) if uformer_root else None,
@@ -228,6 +262,9 @@ def prepare_new_run(
     inference_mode: str,
     uformer_root: Optional[Path] = None,
     run_name: Optional[str] = None,
+    wandb_mode: str = "online",
+    wandb_entity: Optional[str] = None,
+    wandb_project: str = "cdd11-restoration",
 ) -> Tuple[Path, Dict[str, object]]:
     model_id = normalize_model_id(model_id)
     if run_kind not in RUN_PROFILES:
@@ -238,6 +275,19 @@ def prepare_new_run(
         raise ValueError("microbatch_size must be between 1 and 11")
     if inference_mode not in {"native", "tiled"}:
         raise ValueError("inference_mode must be 'native' or 'tiled'")
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        raise ValueError("wandb_mode must be 'online', 'offline', or 'disabled'")
+    if wandb_mode != "disabled":
+        try:
+            import wandb
+        except ImportError as error:
+            raise RuntimeError(
+                "W&B is enabled but the wandb SDK is not installed"
+            ) from error
+        if wandb.__version__ != WANDB_VERSION:
+            raise RuntimeError(
+                f"CDD-11-v1 requires wandb=={WANDB_VERSION}, got {wandb.__version__}"
+            )
     repository_state = git_state(repository_root)
     if repository_state["dirty"]:
         raise RuntimeError(
@@ -279,6 +329,11 @@ def prepare_new_run(
         num_workers=num_workers,
         microbatch_size=microbatch_size,
         inference_mode=inference_mode,
+        output_root=output_root,
+        wandb_mode=wandb_mode,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+        wandb_run_id=(uuid.uuid4().hex[:16] if wandb_mode != "disabled" else None),
     )
     _write_yaml_atomic(run_dir / "config.yaml", config)
     atomic_write_json(
@@ -289,12 +344,19 @@ def prepare_new_run(
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
         },
     )
-    (run_dir / "checkpoints").mkdir()
+    for directory in ("checkpoints", "logs", "validation", "wandb"):
+        (run_dir / directory).mkdir()
+    if config["monitoring"]["wandb_run_id"] is not None:
+        (run_dir / "wandb_run_id.txt").write_text(
+            str(config["monitoring"]["wandb_run_id"]) + "\n",
+            encoding="utf-8",
+        )
     return run_dir, config
 
 
 __all__ = [
     "RUN_PROFILES",
+    "WANDB_VERSION",
     "append_jsonl",
     "atomic_write_json",
     "build_run_config",

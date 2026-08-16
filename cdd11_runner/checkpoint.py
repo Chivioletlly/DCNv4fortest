@@ -60,6 +60,7 @@ def build_checkpoint(
         "manifest_sha256": dict(config["data"]["manifest_sha256"]),
         "repository_commit": config["source"]["repository_commit"],
         "uformer_commit": config["source"]["uformer_commit"],
+        "wandb_run_id": config["monitoring"].get("wandb_run_id"),
         "run_dir": config["paths"]["run_dir"],
         "run_name": config["run_name"],
     }
@@ -113,6 +114,12 @@ def validate_checkpoint_identity(
         "repository_commit": (checkpoint["repository_commit"], repository_commit),
         "uformer_commit": (checkpoint["uformer_commit"], uformer_commit),
     }
+    expected_wandb_run_id = config["monitoring"].get("wandb_run_id")
+    if expected_wandb_run_id is not None:
+        checks["wandb_run_id"] = (
+            checkpoint.get("wandb_run_id"),
+            expected_wandb_run_id,
+        )
     mismatches = [name for name, pair in checks.items() if pair[0] != pair[1]]
     if mismatches:
         details = "; ".join(
