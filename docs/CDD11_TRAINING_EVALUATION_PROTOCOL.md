@@ -96,6 +96,14 @@ python -m cdd11_runner.train `
 python -m cdd11_runner.train --resume D:\experiments\...\checkpoints\latest.pth
 ```
 
+若 smoke 已到 100 步并完整写出 1100 条验证记录、固定可视化、latest/best checkpoint 和最终指标，但在验证后的进程收尾阶段收到 `KeyboardInterrupt`，不得手工编辑 `run_state.json` 或重新训练。使用审计恢复入口；它会逐项核对 checkpoint、scheduler、冻结清单、逐图指标、可视化以及主仓库/Uformer 提交，并生成不可覆盖的 `completion_recovery.json` 后再原子更新完成态：
+
+```powershell
+python -m cdd11_runner.recover --run-dir D:\experiments\...\uformer-smoke-run
+```
+
+恢复证据不完整、运行不是 smoke、源提交不属于当前恢复工具的历史或恢复审计已存在时都会拒绝写入。正常 `--resume` 对同一代码提交下已经完成计算和验证的 max-step checkpoint 也执行同一证据检查并幂等补全状态。
+
 ## 5. 验证与推理模式
 
 默认使用 batch size 1 的原分辨率推理。若 pilot 中任一模型在原分辨率验证发生显存不足，则废弃三者的该轮 pilot，并对三个模型统一使用：

@@ -27,6 +27,7 @@ from .models import (
     validate_architecture_metadata,
 )
 from .protocol import DEGRADATIONS
+from .recover import validate_completed_run_artifacts
 from .runtime import (
     append_jsonl,
     atomic_write_json,
@@ -297,6 +298,21 @@ def run_training(
         best_metrics = dict(checkpoint["best_metrics"])
 
     max_steps = int(config["training"]["max_steps"])
+    if resume_checkpoint is not None and global_step == max_steps:
+        evidence = validate_completed_run_artifacts(run_dir, config)
+        _update_run_state(
+            run_dir,
+            status="completed",
+            global_step=global_step,
+            best_metrics=best_metrics,
+            message="Idempotent completion recovery from a fully evaluated checkpoint",
+        )
+        print(
+            "CDD-11 completed checkpoint already has full validation artifacts: "
+            f"model={evidence['model']} step={global_step}",
+            flush=True,
+        )
+        return
     scalar_interval = int(config["monitoring"]["scalar_interval_steps"])
     target_step = resolve_training_target_step(
         global_step=global_step,
