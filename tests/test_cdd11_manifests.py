@@ -173,6 +173,104 @@ def test_prepare_manifests_rejects_pair_orientation_mismatch():
             raise AssertionError("Expected CDD-11 audit to reject pair orientation drift")
 
 
+def test_prepare_manifests_keeps_exact_clear_duplicates_in_one_split():
+    with _temporary_directory() as root:
+        data_root = root / "CDD-11"
+        output = root / "manifests"
+        _make_source(data_root)
+        duplicate_pixels = (77, 77, 77)
+        for filename in ("scene_000.png", "scene_001.png"):
+            Image.new("RGB", (13, 9), color=duplicate_pixels).save(
+                data_root / "train" / "clear" / filename
+            )
+        expectations = ProtocolExpectations(
+            official_train_scenes=4,
+            official_test_scenes=2,
+            validation_scenes=2,
+            image_width=13,
+            image_height=9,
+        )
+
+        audit = prepare_cdd11_manifests(
+            data_root,
+            output,
+            expectations=expectations,
+        )
+
+        train_scenes = {
+            row["metadata"]["filename"]
+            for row in _read_jsonl(output / "train.jsonl")
+        }
+        val_scenes = {
+            row["metadata"]["filename"]
+            for row in _read_jsonl(output / "val.jsonl")
+        }
+        duplicate_scenes = {"scene_000.png", "scene_001.png"}
+        assert duplicate_scenes.issubset(train_scenes) or duplicate_scenes.issubset(
+            val_scenes
+        )
+        assert len(val_scenes) == 2
+        assert audit["duplicate_audit"]["train_unique_sha256"] == 3
+        assert audit["duplicate_audit"]["within_split_exact_duplicate_groups"] == {
+            "train": 1,
+            "test": 0,
+        }
+
+
+def test_prepare_manifests_rejects_exact_clear_duplicate_across_official_splits():
+    with _temporary_directory() as root:
+        data_root = root / "CDD-11"
+        _make_source(data_root)
+        source = data_root / "train" / "clear" / "scene_000.png"
+        destination = data_root / "test" / "clear" / "scene_000.png"
+        shutil.copy2(source, destination)
+        expectations = ProtocolExpectations(
+            official_train_scenes=4,
+            official_test_scenes=2,
+            validation_scenes=2,
+            image_width=13,
+            image_height=9,
+        )
+
+        try:
+            prepare_cdd11_manifests(
+                data_root,
+                root / "manifests",
+                expectations=expectations,
+            )
+        except AuditError as error:
+            assert "across official splits" in str(error)
+        else:
+            raise AssertionError("Expected official train/test content leakage to fail")
+
+
+def test_prepare_manifests_rejects_exact_duplicate_within_official_test():
+    with _temporary_directory() as root:
+        data_root = root / "CDD-11"
+        _make_source(data_root)
+        source = data_root / "test" / "clear" / "scene_000.png"
+        destination = data_root / "test" / "clear" / "scene_001.png"
+        shutil.copy2(source, destination)
+        expectations = ProtocolExpectations(
+            official_train_scenes=4,
+            official_test_scenes=2,
+            validation_scenes=2,
+            image_width=13,
+            image_height=9,
+        )
+
+        try:
+            prepare_cdd11_manifests(
+                data_root,
+                root / "manifests",
+                expectations=expectations,
+            )
+        except AuditError as error:
+            assert "within official test split" in str(error)
+        else:
+            raise AssertionError("Expected duplicate official test content to fail")
+
+
 def test_prepare_manifests_rejects_category_filename_mismatch():
     with _temporary_directory() as root:
         data_root = root / "CDD-11"

@@ -282,40 +282,120 @@ def _assert_split_isolation(
         raise AuditError("CDD-11 scene leakage across splits: " + "; ".join(conflicts))
 
 
-def _assert_no_exact_clear_duplicates(
+def _clear_content_groups(
+    clear: Mapping[str, Path],
+) -> Dict[str, Tuple[str, ...]]:
+    by_hash: Dict[str, List[str]] = {}
+    for filename, path in sorted(clear.items()):
+        by_hash.setdefault(file_sha256(path), []).append(filename)
+    return {
+        digest: tuple(sorted(by_hash[digest]))
+        for digest in sorted(by_hash)
+    }
+
+
+def _audit_exact_clear_duplicates(
     train_clear: Mapping[str, Path],
     test_clear: Mapping[str, Path],
-) -> Dict[str, object]:
-    train_by_hash: Dict[str, List[str]] = {}
-    for filename, path in train_clear.items():
-        train_by_hash.setdefault(file_sha256(path), []).append(filename)
-    test_by_hash: Dict[str, List[str]] = {}
-    for filename, path in test_clear.items():
-        test_by_hash.setdefault(file_sha256(path), []).append(filename)
-    within_split = {
-        "train": [values for values in train_by_hash.values() if len(values) > 1],
-        "test": [values for values in test_by_hash.values() if len(values) > 1],
-    }
-    if within_split["train"] or within_split["test"]:
-        raise AuditError(f"Exact duplicate clear scenes within official split: {within_split}")
+) -> Tuple[Dict[str, object], Dict[str, Tuple[str, ...]]]:
+    train_by_hash = _clear_content_groups(train_clear)
+    test_by_hash = _clear_content_groups(test_clear)
+    within_split = {}
+    for split, groups in (("train", train_by_hash), ("test", test_by_hash)):
+        within_split[split] = [
+            {"sha256": digest, "filenames": list(filenames)}
+            for digest, filenames in groups.items()
+            if len(filenames) > 1
+        ]
+    if within_split["test"]:
+        raise AuditError(
+            "Exact duplicate clear scenes within official test split: "
+            f"{within_split['test']}"
+        )
     duplicates = []
-    for digest, test_filenames in test_by_hash.items():
+    for digest, test_filenames in sorted(test_by_hash.items()):
         if digest in train_by_hash:
             duplicates.append(
                 {
-                    "test": test_filenames,
-                    "train": train_by_hash[digest],
+                    "test": list(test_filenames),
+                    "train": list(train_by_hash[digest]),
                     "sha256": digest,
                 }
             )
     if duplicates:
         raise AuditError(f"Exact clear-image duplicates across official splits: {duplicates[:20]}")
-    return {
+    audit = {
         "train_unique_sha256": len(train_by_hash),
         "test_unique_sha256": len(test_by_hash),
-        "within_split_exact_duplicates": 0,
+        "within_split_exact_duplicate_groups": {
+            split: len(groups) for split, groups in within_split.items()
+        },
+        "within_split_exact_duplicate_files": {
+            split: sum(len(group["filenames"]) for group in groups)
+            for split, groups in within_split.items()
+        },
+        "within_split_groups": within_split,
         "cross_split_exact_duplicates": 0,
     }
+    return audit, train_by_hash
+
+
+def _select_validation_content_groups(
+    train_by_hash: Mapping[str, Sequence[str]],
+    validation_scenes: int,
+) -> Tuple[set, Dict[str, object]]:
+    ordered_groups = sorted(
+        train_by_hash.items(),
+        key=lambda item: (
+            min(split_sort_key(filename) for filename in item[1]),
+            item[0],
+        ),
+    )
+    selected_filenames = set()
+    selected_digests = []
+    skipped_at_boundary = []
+    for digest, filenames in ordered_groups:
+        remaining = validation_scenes - len(selected_filenames)
+        if remaining == 0:
+            break
+        if len(filenames) > remaining:
+            skipped_at_boundary.append(
+                {"sha256": digest, "filenames": list(filenames)}
+            )
+            continue
+        selected_filenames.update(filenames)
+        selected_digests.append(digest)
+    if len(selected_filenames) != validation_scenes:
+        raise AuditError(
+            "Could not select the requested validation scene count without "
+            "splitting exact-clear-content groups: "
+            f"{len(selected_filenames)} != {validation_scenes}"
+        )
+    return selected_filenames, {
+        "official_train_content_groups": len(ordered_groups),
+        "validation_content_groups": len(selected_digests),
+        "validation_group_sha256": selected_digests,
+        "skipped_groups_at_boundary": skipped_at_boundary,
+    }
+
+
+def _assert_clear_content_group_isolation(
+    train_by_hash: Mapping[str, Sequence[str]],
+    train_filenames: Sequence[str],
+    val_filenames: Sequence[str],
+) -> None:
+    train_set = set(train_filenames)
+    val_set = set(val_filenames)
+    conflicts = [
+        {"sha256": digest, "filenames": list(filenames)}
+        for digest, filenames in train_by_hash.items()
+        if train_set.intersection(filenames) and val_set.intersection(filenames)
+    ]
+    if conflicts:
+        raise AuditError(
+            "Exact clear-image content leaked across train/val: "
+            f"{conflicts[:20]}"
+        )
 
 
 def _select_visual_samples(val_rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
@@ -387,11 +467,21 @@ def prepare_cdd11_manifests(
         verify_images=verify_images,
         image_cache=image_cache,
     )
-    duplicate_audit = _assert_no_exact_clear_duplicates(train_clear, test_clear)
+    duplicate_audit, train_by_hash = _audit_exact_clear_duplicates(
+        train_clear,
+        test_clear,
+    )
 
-    ordered_train_filenames = sorted(train_clear, key=split_sort_key)
-    val_filenames = set(ordered_train_filenames[: expectations.validation_scenes])
-    fit_filenames = set(ordered_train_filenames[expectations.validation_scenes :])
+    val_filenames, content_group_split = _select_validation_content_groups(
+        train_by_hash,
+        expectations.validation_scenes,
+    )
+    fit_filenames = set(train_clear) - val_filenames
+    _assert_clear_content_group_isolation(
+        train_by_hash,
+        sorted(fit_filenames),
+        sorted(val_filenames),
+    )
     train_rows = _rows_for_filenames(
         fit_filenames,
         clear=train_clear,
@@ -463,8 +553,13 @@ def prepare_cdd11_manifests(
         },
         "scene_split": {
             "seed": 3407,
-            "rule": "lowest SHA256(cdd11-v1:split:3407:<filename>) assigned to val",
+            "rule": (
+                "group filenames by exact clear-image SHA256; order groups by the "
+                "lowest SHA256(cdd11-v1:split:3407:<filename>) among their members; "
+                "add a whole group only when it fits the remaining validation slots"
+            ),
             "validation_filenames": sorted(val_filenames),
+            **content_group_split,
         },
         "duplicate_audit": duplicate_audit,
         "image_audit": {
