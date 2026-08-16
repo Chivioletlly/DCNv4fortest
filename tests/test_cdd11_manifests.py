@@ -80,8 +80,97 @@ def test_prepare_manifests_freezes_scene_disjoint_1x11_splits():
         assert audit["splits"]["val"]["rows_by_degradation"] == {
             degradation: 2 for degradation in DEGRADATIONS
         }
+        assert audit["image_audit"]["allowed_sizes"] == [
+            {"width": 13, "height": 9},
+            {"width": 9, "height": 13},
+        ]
         visuals = json.loads((output / "visual_samples.json").read_text("utf-8"))
         assert len(visuals["ordered_sample_ids"]) == 2 * len(DEGRADATIONS)
+
+
+def test_prepare_manifests_accepts_mixed_landscape_and_portrait_pairs():
+    with _temporary_directory() as root:
+        data_root = root / "CDD-11"
+        output = root / "manifests"
+        _make_source(data_root)
+        for directory in ("clear", *DEGRADATIONS):
+            Image.new("RGB", (9, 13), color=(42,) * 3).save(
+                data_root / "train" / directory / "scene_000.png"
+            )
+        expectations = ProtocolExpectations(
+            official_train_scenes=4,
+            official_test_scenes=2,
+            validation_scenes=2,
+            image_width=13,
+            image_height=9,
+        )
+
+        audit = prepare_cdd11_manifests(
+            data_root,
+            output,
+            expectations=expectations,
+        )
+
+        assert audit["status"] == "pass"
+        assert audit["image_audit"]["verified_files"] == 72
+        assert audit["image_audit"]["observed_sizes"] == [
+            {"width": 9, "height": 13, "files": 12},
+            {"width": 13, "height": 9, "files": 60},
+        ]
+
+
+def test_prepare_manifests_rejects_size_outside_allowed_orientations():
+    with _temporary_directory() as root:
+        data_root = root / "CDD-11"
+        _make_source(data_root)
+        Image.new("RGB", (8, 13), color=(42,) * 3).save(
+            data_root / "train" / "clear" / "scene_000.png"
+        )
+        expectations = ProtocolExpectations(
+            official_train_scenes=4,
+            official_test_scenes=2,
+            validation_scenes=2,
+            image_width=13,
+            image_height=9,
+        )
+
+        try:
+            prepare_cdd11_manifests(
+                data_root,
+                root / "manifests",
+                expectations=expectations,
+            )
+        except AuditError as error:
+            assert "not in (13x9, 9x13)" in str(error)
+        else:
+            raise AssertionError("Expected CDD-11 audit to reject an unsupported size")
+
+
+def test_prepare_manifests_rejects_pair_orientation_mismatch():
+    with _temporary_directory() as root:
+        data_root = root / "CDD-11"
+        _make_source(data_root)
+        Image.new("RGB", (9, 13), color=(42,) * 3).save(
+            data_root / "train" / "snow" / "scene_000.png"
+        )
+        expectations = ProtocolExpectations(
+            official_train_scenes=4,
+            official_test_scenes=2,
+            validation_scenes=2,
+            image_width=13,
+            image_height=9,
+        )
+
+        try:
+            prepare_cdd11_manifests(
+                data_root,
+                root / "manifests",
+                expectations=expectations,
+            )
+        except AuditError as error:
+            assert "Pair metadata mismatch" in str(error)
+        else:
+            raise AssertionError("Expected CDD-11 audit to reject pair orientation drift")
 
 
 def test_prepare_manifests_rejects_category_filename_mismatch():

@@ -40,6 +40,7 @@ class ProtocolExpectations:
     validation_scenes: int = 100
     image_width: int = 1080
     image_height: int = 720
+    allow_transposed_orientation: bool = True
     require_rgb: bool = True
     require_png: bool = True
 
@@ -47,9 +48,20 @@ class ProtocolExpectations:
     def training_scenes(self) -> int:
         return self.official_train_scenes - self.validation_scenes
 
+    @property
+    def allowed_image_sizes(self) -> Tuple[Tuple[int, int], ...]:
+        sizes = [(self.image_width, self.image_height)]
+        if self.allow_transposed_orientation and self.image_width != self.image_height:
+            sizes.append((self.image_height, self.image_width))
+        return tuple(sizes)
+
     def to_dict(self) -> Dict[str, object]:
         value = asdict(self)
         value["training_scenes"] = self.training_scenes
+        value["allowed_image_sizes"] = [
+            {"width": width, "height": height}
+            for width, height in self.allowed_image_sizes
+        ]
         return value
 
 

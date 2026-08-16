@@ -135,14 +135,14 @@ def _inspect_image(
                 image.load()
     except Exception as error:
         raise AuditError(f"Failed to decode CDD-11 image {path}: {error}") from error
-    if (info.width, info.height) != (
-        expectations.image_width,
-        expectations.image_height,
-    ):
+    if (info.width, info.height) not in expectations.allowed_image_sizes:
+        allowed = ", ".join(
+            f"{width}x{height}"
+            for width, height in expectations.allowed_image_sizes
+        )
         raise AuditError(
             f"Unexpected CDD-11 image size for {path}: "
-            f"{info.width}x{info.height} != "
-            f"{expectations.image_width}x{expectations.image_height}"
+            f"{info.width}x{info.height} not in ({allowed})"
         )
     if expectations.require_rgb and info.mode != "RGB":
         raise AuditError(f"CDD-11 image is not RGB: {path} has mode {info.mode!r}")
@@ -415,6 +415,10 @@ def prepare_cdd11_manifests(
     )
     _assert_split_isolation(train_rows, val_rows, test_rows)
 
+    observed_sizes = Counter(
+        (info.width, info.height) for info in image_cache.values()
+    )
+
     expected_counts = {
         "train": expectations.training_scenes * len(DEGRADATIONS),
         "val": expectations.validation_scenes * len(DEGRADATIONS),
@@ -465,8 +469,14 @@ def prepare_cdd11_manifests(
         "duplicate_audit": duplicate_audit,
         "image_audit": {
             "verified_files": len(image_cache),
-            "expected_width": expectations.image_width,
-            "expected_height": expectations.image_height,
+            "allowed_sizes": [
+                {"width": width, "height": height}
+                for width, height in expectations.allowed_image_sizes
+            ],
+            "observed_sizes": [
+                {"width": width, "height": height, "files": files}
+                for (width, height), files in sorted(observed_sizes.items())
+            ],
             "required_mode": "RGB" if expectations.require_rgb else None,
         },
         "manifests": manifest_entries,
